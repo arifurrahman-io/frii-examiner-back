@@ -1,7 +1,11 @@
 const express = require("express");
 const dotenv = require("dotenv");
+
+// Load env variables FIRST, before importing anything that uses them (like connectDB)
+dotenv.config(); // ✅ FIX: Moved to the top to ensure process.env.MONGO_URI is set
+
 const cors = require("cors");
-const connectDB = require("./config/db");
+const connectDB = require("./config/db"); // Now, connectDB has access to MONGO_URI
 
 // --- রুট ফাইলগুলি ইমপোর্ট করা হচ্ছে ---
 const teacherRoutes = require("./routes/teacherRoutes");
@@ -16,11 +20,8 @@ const responsibilityTypeRoutes = require("./routes/responsibilityTypeRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const leaveRoutes = require("./routes/leaveRoutes"); // ✅ NEW: Leave Routes
 
-// Load env variables
-dotenv.config();
-
 // Connect to Database
-connectDB();
+connectDB(); // Now, the function runs with a defined MONGO_URI
 
 const app = express();
 

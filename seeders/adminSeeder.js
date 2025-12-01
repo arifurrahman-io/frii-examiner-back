@@ -9,8 +9,8 @@ connectDB(); // ডাটাবেস সংযোগ করুন
 const seedAdminUser = async () => {
   try {
     // ১. অ্যাডমিনের ক্রেডেনশিয়ালস
-    const adminUsername = process.env.ADMIN_USERNAME || "superadmin";
-    const adminPassword = process.env.ADMIN_PASSWORD || "password123";
+    const adminUsername = process.env.ADMIN_USERNAME;
+    const adminPassword = process.env.ADMIN_PASSWORD;
 
     // ডুপ্লিকেট অ্যাডমিন চেক করা
     const existingAdmin = await User.findOne({ username: adminUsername });

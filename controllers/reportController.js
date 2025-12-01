@@ -14,11 +14,10 @@ const getReportData = async (req, res) => {
     let filter = {};
     if (year) filter.year = parseInt(year);
 
-    // FIX 1: Explicitly cast typeId to ObjectId if valid
+    // Explicitly cast typeId, classId to ObjectId if valid (used in base filter for all queries)
     if (typeId && mongoose.Types.ObjectId.isValid(typeId)) {
       filter.responsibilityType = new mongoose.Types.ObjectId(typeId);
     }
-    // FIX 1: Explicitly cast classId to ObjectId if valid
     if (classId && mongoose.Types.ObjectId.isValid(classId)) {
       filter.targetClass = new mongoose.Types.ObjectId(classId);
     }
@@ -26,13 +25,15 @@ const getReportData = async (req, res) => {
     if (status) filter.status = status;
     if (!status) filter.status = { $ne: "Cancelled" };
 
-    // Decide if we need aggregation
-    const useAggregation = reportType !== "DETAILED_ASSIGNMENT" || branchId;
+    // Aggregation is required if it's a summary OR if we need to filter by BranchID (due to legacy data issues)
+    const requiresAggregation =
+      reportType !== "DETAILED_ASSIGNMENT" ||
+      (branchId && mongoose.Types.ObjectId.isValid(branchId));
 
-    if (useAggregation) {
+    if (requiresAggregation) {
       let pipeline = [{ $match: filter }];
 
-      // Lookup teacher
+      // Look up Teacher details (required for name/ID and legacy campus lookup)
       pipeline.push({
         $lookup: {
           from: "teachers",
@@ -41,23 +42,38 @@ const getReportData = async (req, res) => {
           as: "teacherDetails",
         },
       });
-      pipeline.push({ $unwind: "$teacherDetails" });
+      pipeline.push({
+        $unwind: { path: "$teacherDetails", preserveNullAndEmptyArrays: false },
+      });
 
-      // Branch filter
+      // ✅ FIX: Implement Strict Branch Filtering Logic in Aggregation
       if (branchId && mongoose.Types.ObjectId.isValid(branchId)) {
+        // Match the branch ID against EITHER the new stored field OR the old teacher's campus field
+        const branchObjectId = new mongoose.Types.ObjectId(branchId);
+
         pipeline.push({
           $match: {
-            "teacherDetails.campus": new mongoose.Types.ObjectId(branchId),
+            $or: [
+              // 1. New data: Match directly on the assignment document
+              { teacherCampus: branchObjectId },
+              // 2. Old data: Match on the campus referenced in the teacherDetails
+              { "teacherDetails.campus": branchObjectId },
+            ],
           },
         });
       }
 
+      // --- SUMMARY REPORTS: CAMPUS & CLASS ---
+
       if (reportType === "CAMPUS_SUMMARY") {
         pipeline.push(
+          // Look up Branch Name directly using the stored teacherCampus field (or teacherDetails.campus for old data)
           {
             $lookup: {
               from: "branches",
-              localField: "teacherDetails.campus",
+              localField: {
+                $ifNull: ["$teacherCampus", "$teacherDetails.campus"],
+              }, // Use direct campus or teacher's campus
               foreignField: "_id",
               as: "branchDetails",
             },
@@ -69,6 +85,15 @@ const getReportData = async (req, res) => {
             },
           },
           {
+            $lookup: {
+              from: "responsibilitytypes",
+              localField: "responsibilityType",
+              foreignField: "_id",
+              as: "typeDetails",
+            },
+          },
+          { $unwind: "$typeDetails" },
+          {
             $group: {
               _id: {
                 branch: { $ifNull: ["$branchDetails.name", "N/A"] },
@@ -77,15 +102,6 @@ const getReportData = async (req, res) => {
               totalAssignments: { $sum: 1 },
             },
           },
-          {
-            $lookup: {
-              from: "responsibilitytypes",
-              localField: "_id.type",
-              foreignField: "_id",
-              as: "typeDetails",
-            },
-          },
-          { $unwind: "$typeDetails" },
           {
             $project: {
               _id: 0,
@@ -102,94 +118,151 @@ const getReportData = async (req, res) => {
       }
 
       if (reportType === "CLASS_SUMMARY") {
-        pipeline.push(
-          {
-            $lookup: {
-              from: "classes",
-              localField: "targetClass",
-              foreignField: "_id",
-              as: "classDetails",
-            },
+        // This path doesn't rely on campus filtering or lookup, but maintains the base teacher lookup
+
+        // Look up Class details
+        pipeline.push({
+          $lookup: {
+            from: "classes",
+            localField: "targetClass",
+            foreignField: "_id",
+            as: "classDetails",
           },
-          {
-            $unwind: {
-              path: "$classDetails",
-              preserveNullAndEmptyArrays: true,
-            },
+        });
+        pipeline.push({
+          $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true },
+        });
+
+        // Look up Responsibility Type details
+        pipeline.push({
+          $lookup: {
+            from: "responsibilitytypes",
+            localField: "responsibilityType",
+            foreignField: "_id",
+            as: "typeDetails",
           },
-          {
-            $lookup: {
-              from: "responsibilitytypes",
-              localField: "responsibilityType",
-              foreignField: "_id",
-              as: "typeDetails",
+        });
+        pipeline.push({ $unwind: "$typeDetails" });
+
+        // Grouping
+        pipeline.push({
+          $group: {
+            _id: {
+              class: { $ifNull: ["$classDetails.name", "N/A"] },
+              type: "$responsibilityType",
             },
+            totalAssignments: { $sum: 1 },
           },
-          { $unwind: "$typeDetails" },
-          {
-            $group: {
-              _id: {
-                class: { $ifNull: ["$classDetails.name", "N/A"] },
-                type: "$responsibilityType",
-              },
-              totalAssignments: { $sum: 1 },
-            },
+        });
+
+        // Projection and Sort
+        pipeline.push({
+          $project: {
+            _id: 0,
+            Class: "$_id.class",
+            ResponsibilityType: "$typeDetails.name",
+            TotalAssignments: "$totalAssignments",
           },
-          {
-            $project: {
-              _id: 0,
-              Class: "$_id.class",
-              ResponsibilityType: "$typeDetails.name",
-              TotalAssignments: "$totalAssignments",
-            },
-          },
-          { $sort: { Class: 1, ResponsibilityType: 1 } }
-        );
+        });
+        pipeline.push({ $sort: { Class: 1, ResponsibilityType: 1 } });
 
         const data = await ResponsibilityAssignment.aggregate(pipeline);
         return res.json(data);
       }
 
-      // DETAILED_ASSIGNMENT with branch filter
-      const assignmentIdsAgg = await ResponsibilityAssignment.aggregate([
-        ...pipeline,
-        { $project: { _id: 1 } },
-      ]);
-      const ids = assignmentIdsAgg.map((a) => a._id);
+      // --- DETAILED ASSIGNMENT LIST (Forced Aggregation Path) ---
 
-      const assignments = await ResponsibilityAssignment.find({
-        _id: { $in: ids },
-      })
-        .populate({
-          path: "teacher",
-          select: "name teacherId campus",
-          populate: { path: "campus", select: "name" },
-        })
-        .populate("responsibilityType", "name")
-        .populate("targetClass", "name")
-        .populate("targetSubject", "name")
-        .sort({ "targetClass.level": 1, "teacher.name": 1 });
+      // If reportType is DETAILED_ASSIGNMENT AND branchId was present, we continue the aggregation.
 
-      const formatted = assignments.map((a, idx) => ({
-        ID: idx + 1,
-        TeacherName: a.teacher.name,
-        TeacherID: a.teacher.teacherId,
-        Campus: a.teacher.campus ? a.teacher.campus.name : "N/A",
-        ResponsibilityType: a.responsibilityType.name,
-        Year: a.year,
-        Class: a.targetClass ? a.targetClass.name : "N/A",
-        Subject: a.targetSubject ? a.targetSubject.name : "N/A",
-      }));
+      pipeline.push(
+        // Look up Branch Name
+        {
+          $lookup: {
+            from: "branches",
+            localField: {
+              $ifNull: ["$teacherCampus", "$teacherDetails.campus"],
+            }, // Use direct campus or teacher's campus
+            foreignField: "_id",
+            as: "branchDetails",
+          },
+        },
+        {
+          $unwind: { path: "$branchDetails", preserveNullAndEmptyArrays: true },
+        },
+        // Look up Responsibility Type
+        {
+          $lookup: {
+            from: "responsibilitytypes",
+            localField: "responsibilityType",
+            foreignField: "_id",
+            as: "typeDetails",
+          },
+        },
+        { $unwind: "$typeDetails" },
+        // Look up Class
+        {
+          $lookup: {
+            from: "classes",
+            localField: "targetClass",
+            foreignField: "_id",
+            as: "classDetails",
+          },
+        },
+        {
+          $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true },
+        },
+        // Look up Subject
+        {
+          $lookup: {
+            from: "subjects",
+            localField: "targetSubject",
+            foreignField: "_id",
+            as: "subjectDetails",
+          },
+        },
+        {
+          $unwind: {
+            path: "$subjectDetails",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+
+        // Final Projection to match the find().populate() output keys
+        {
+          $project: {
+            ID: { $literal: 0 }, // Placeholder for frontend-generated ID
+            TEACHER: "$teacherDetails.name",
+            CAMPUS: { $ifNull: ["$branchDetails.name", "N/A"] },
+            RESPONSIBILITY_TYPE: "$typeDetails.name",
+            YEAR: "$year",
+            CLASS: { $ifNull: ["$classDetails.name", "N/A"] },
+            SUBJECT: { $ifNull: ["$subjectDetails.name", "N/A"] },
+            STATUS: "$status",
+            _ID: "$_id",
+            TEACHERID: "$teacherDetails.teacherId",
+            "CREATED AT": "$createdAt",
+            "UPDATED AT": "$updatedAt",
+          },
+        },
+        { $sort: { CLASS: 1, TEACHER: 1 } }
+      );
+
+      const data = await ResponsibilityAssignment.aggregate(pipeline);
+
+      // Add the sequential ID in the final step (since it was a placeholder above)
+      const formatted = data.map((item, idx) => ({ ...item, ID: idx + 1 }));
 
       return res.json(formatted);
     } else {
-      // Simple DETAILED_ASSIGNMENT without branch filter
+      // --- Simple DETAILED_ASSIGNMENT (No branch filter, use efficient find().populate()) ---
+      // filter only contains year/type/class filters (branchId is NOT present here)
+
+      // NOTE: We only use the find().populate() path if NO branch filter is applied,
+      // as the find() query logic is simpler and faster when not dealing with legacy data issues.
+
       const assignments = await ResponsibilityAssignment.find(filter)
-        .populate({
-          path: "teacher",
-          select: "name teacherId campus",
-          populate: { path: "campus", select: "name" },
-        })
+        .populate("teacher", "name teacherId")
+        .populate("teacherCampus", "name")
         .populate("responsibilityType", "name")
         .populate("targetClass", "name")
         .populate("targetSubject", "name")
@@ -197,25 +270,32 @@ const getReportData = async (req, res) => {
 
       const formatted = assignments.map((a, idx) => ({
         ID: idx + 1,
-        TeacherName: a.teacher.name,
-        TeacherID: a.teacher.teacherId,
-        Campus: a.teacher.campus ? a.teacher.campus.name : "N/A",
-        ResponsibilityType: a.responsibilityType.name,
-        Year: a.year,
-        Class: a.targetClass ? a.targetClass.name : "N/A",
-        Subject: a.targetSubject ? a.targetSubject.name : "N/A",
+        TEACHER: a.teacher ? a.teacher.name : "N/A",
+        CAMPUS: a.teacherCampus ? a.teacherCampus.name : "N/A",
+        RESPONSIBILITY_TYPE: a.responsibilityType
+          ? a.responsibilityType.name
+          : "N/A",
+        YEAR: a.year,
+        CLASS: a.targetClass ? a.targetClass.name : "N/A",
+        SUBJECT: a.targetSubject ? a.targetSubject.name : "N/A",
+        STATUS: a.status,
+        _ID: a._id,
+        TEACHERID: a.teacher ? a.teacher.teacherId : "N/A",
       }));
 
       return res.json(formatted);
     }
   } catch (error) {
-    console.error("Error fetching report:", error);
-    return res.status(500).json({ message: error.message });
+    console.error("CRITICAL REPORT FETCH ERROR:", error);
+    return res.status(500).json({
+      message:
+        "An internal server error occurred during report generation. Check server logs.",
+    });
   }
 };
 
 // ----------------------------
-// 2. EXPORT TO EXCEL
+// 2. EXPORT TO EXCEL (Requires the core data function)
 // ----------------------------
 const exportToExcel = async (req, res) => {
   const { year, typeId, classId, reportType, branchId } = req.query;
@@ -276,123 +356,23 @@ const exportToExcel = async (req, res) => {
 };
 
 // ----------------------------
-// 3. PDF DATA
+// 3. PDF DATA (Used for client-side PDF generation)
 // ----------------------------
 const getPDFDataForClient = async (req, res) => {
+  const { year, typeId, classId, status, reportType, branchId } = req.query;
+
+  const pseudoReq = {
+    query: { year, typeId, classId, status, reportType, branchId },
+  };
+  const pseudoRes = {
+    json: (data) => data,
+    status: () => pseudoRes,
+    send: () => {},
+  };
+
   try {
-    // FIX 2: Corrected parameter name from 'campusId' to 'branchId' to match frontend/convention
-    const { year, typeId, classId, status, branchId } = req.query;
-
-    // Base filter for ResponsibilityAssignment
-    let matchQuery = {};
-    if (year) matchQuery.year = parseInt(year);
-
-    // FIX 3: Explicitly cast typeId and classId to ObjectId if valid
-    if (typeId && mongoose.Types.ObjectId.isValid(typeId)) {
-      matchQuery.responsibilityType = new mongoose.Types.ObjectId(typeId);
-    }
-    if (classId && mongoose.Types.ObjectId.isValid(classId)) {
-      matchQuery.targetClass = new mongoose.Types.ObjectId(classId);
-    }
-
-    if (status) matchQuery.status = status;
-    if (!matchQuery.status) matchQuery.status = { $ne: "Cancelled" };
-
-    // Start pipeline
-    let pipeline = [{ $match: matchQuery }];
-
-    // Lookup teacher
-    pipeline.push({
-      $lookup: {
-        from: "teachers",
-        localField: "teacher",
-        foreignField: "_id",
-        as: "teacherDetails",
-      },
-    });
-    pipeline.push({ $unwind: "$teacherDetails" });
-
-    // --- Apply campus filter immediately after teacher lookup ---
-    // FIX 4: Use branchId for matching and ensure casting
-    if (branchId && mongoose.Types.ObjectId.isValid(branchId)) {
-      pipeline.push({
-        $match: {
-          "teacherDetails.campus": new mongoose.Types.ObjectId(branchId),
-        },
-      });
-    }
-
-    // Lookup campus/branch name
-    pipeline.push({
-      $lookup: {
-        from: "branches",
-        localField: "teacherDetails.campus",
-        foreignField: "_id",
-        as: "branchDetails",
-      },
-    });
-    pipeline.push({
-      $unwind: { path: "$branchDetails", preserveNullAndEmptyArrays: true },
-    });
-
-    // Lookup responsibility type
-    pipeline.push({
-      $lookup: {
-        from: "responsibilitytypes",
-        localField: "responsibilityType",
-        foreignField: "_id",
-        as: "typeDetails",
-      },
-    });
-    pipeline.push({ $unwind: "$typeDetails" });
-
-    // Lookup class
-    pipeline.push({
-      $lookup: {
-        from: "classes",
-        localField: "targetClass",
-        foreignField: "_id",
-        as: "classDetails",
-      },
-    });
-    pipeline.push({
-      $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true },
-    });
-
-    // Lookup subject
-    pipeline.push({
-      $lookup: {
-        from: "subjects",
-        localField: "targetSubject",
-        foreignField: "_id",
-        as: "subjectDetails",
-      },
-    });
-    pipeline.push({
-      $unwind: { path: "$subjectDetails", preserveNullAndEmptyArrays: true },
-    });
-
-    // Final projection for PDF
-    pipeline.push({
-      $project: {
-        _id: 1,
-        Teacher: "$teacherDetails.name",
-        Campus: { $ifNull: ["$branchDetails.name", "N/A"] },
-        "Responsibility Type": "$typeDetails.name",
-        Year: "$year",
-        Class: { $ifNull: ["$classDetails.name", "N/A"] },
-        Subject: { $ifNull: ["$subjectDetails.name", "N/A"] },
-        Status: "$status",
-      },
-    });
-
-    // Sort by class and teacher
-    pipeline.push({ $sort: { Class: 1, Teacher: 1 } });
-
-    // Execute
-    const pdfData = await ResponsibilityAssignment.aggregate(pipeline);
-
-    return res.json(pdfData);
+    const data = await getReportData(pseudoReq, pseudoRes);
+    return res.json(data);
   } catch (error) {
     console.error("PDF Fetch Error:", error);
     return res

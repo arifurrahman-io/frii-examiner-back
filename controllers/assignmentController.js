@@ -18,8 +18,10 @@ const assignResponsibility = async (req, res) => {
   } = req.body;
 
   try {
+    // 1. Fetch Teacher Details and Responsibility Type concurrently
     const [teacherExists, typeExists] = await Promise.all([
-      Teacher.findById(teacher),
+      // Populate the 'campus' field from the Teacher model
+      Teacher.findById(teacher).populate("campus"),
       ResponsibilityType.findById(responsibilityType),
     ]);
 
@@ -28,6 +30,17 @@ const assignResponsibility = async (req, res) => {
         .status(404)
         .json({ message: "Teacher or Responsibility Type not found." });
 
+    // ✅ NEW: Extract the campus ID from the fetched teacher object
+    const teacherCampusId = teacherExists.campus?._id;
+
+    // Safety check: ensure campus was found
+    if (!teacherCampusId) {
+      return res
+        .status(400)
+        .json({ message: "Teacher's campus is missing or invalid." });
+    }
+
+    // ... (Leave conflict check remains unchanged) ...
     const leaveConflict = await Leave.findOne({
       teacher,
       responsibilityType,
@@ -40,6 +53,7 @@ const assignResponsibility = async (req, res) => {
         message: `Assignment blocked: Teacher has a Granted Leave for this responsibility type in ${year}.`,
       });
 
+    // ... (Existing assignment check remains unchanged) ...
     const existingAssignment = await ResponsibilityAssignment.findOne({
       teacher,
       responsibilityType,
@@ -53,8 +67,10 @@ const assignResponsibility = async (req, res) => {
         message: "This exact responsibility is already assigned and active.",
       });
 
+    // 2. Create new assignment with the new teacherCampus field
     const newAssignment = await ResponsibilityAssignment.create({
       teacher,
+      teacherCampus: teacherCampusId, // ✅ SAVE THE CAMPUS ID
       responsibilityType,
       year,
       targetClass,

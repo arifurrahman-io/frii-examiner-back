@@ -9,6 +9,12 @@ const ResponsibilityAssignmentSchema = new mongoose.Schema(
       required: true,
     },
 
+    teacherCampus: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Branch",
+      required: false, // Optional, but recommended to be true
+    },
+
     // Reference to the Responsibility Type Model: কী দায়িত্ব দেওয়া হচ্ছে
     responsibilityType: {
       type: mongoose.Schema.Types.ObjectId,
