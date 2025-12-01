@@ -1,10 +1,11 @@
-// controllers/reportController.js
+// arifurrahman-io/frii-examiner-back/frii-examiner-back-aa5325b910a695d44cb8fa1be2371493fec60e67/controllers/reportController.js
+
 const mongoose = require("mongoose");
 const ResponsibilityAssignment = require("../models/ResponsibilityAssignmentModel");
-const exceljs = require("exceljs");
+// Removed: exceljs import as it's no longer used
 
 // ----------------------------
-// 1. GET REPORT DATA
+// 1. GET REPORT DATA (Data Filtering Core Logic)
 // ----------------------------
 const getReportData = async (req, res) => {
   try {
@@ -18,6 +19,7 @@ const getReportData = async (req, res) => {
     if (typeId && mongoose.Types.ObjectId.isValid(typeId)) {
       filter.responsibilityType = new mongoose.Types.ObjectId(typeId);
     }
+    // Added safety check for ObjectId validity
     if (classId && mongoose.Types.ObjectId.isValid(classId)) {
       filter.targetClass = new mongoose.Types.ObjectId(classId);
     }
@@ -46,17 +48,14 @@ const getReportData = async (req, res) => {
         $unwind: { path: "$teacherDetails", preserveNullAndEmptyArrays: false },
       });
 
-      // ✅ FIX: Implement Strict Branch Filtering Logic in Aggregation
+      // Implement Strict Branch Filtering Logic in Aggregation
       if (branchId && mongoose.Types.ObjectId.isValid(branchId)) {
-        // Match the branch ID against EITHER the new stored field OR the old teacher's campus field
         const branchObjectId = new mongoose.Types.ObjectId(branchId);
 
         pipeline.push({
           $match: {
             $or: [
-              // 1. New data: Match directly on the assignment document
               { teacherCampus: branchObjectId },
-              // 2. Old data: Match on the campus referenced in the teacherDetails
               { "teacherDetails.campus": branchObjectId },
             ],
           },
@@ -67,13 +66,19 @@ const getReportData = async (req, res) => {
 
       if (reportType === "CAMPUS_SUMMARY") {
         pipeline.push(
-          // Look up Branch Name directly using the stored teacherCampus field (or teacherDetails.campus for old data)
+          // FIX: Add a new field 'effectiveCampus' using $ifNull
+          {
+            $addFields: {
+              effectiveCampus: {
+                $ifNull: ["$teacherCampus", "$teacherDetails.campus"],
+              },
+            },
+          },
+          // FIX: Look up Branch Name using the new 'effectiveCampus' field
           {
             $lookup: {
               from: "branches",
-              localField: {
-                $ifNull: ["$teacherCampus", "$teacherDetails.campus"],
-              }, // Use direct campus or teacher's campus
+              localField: "effectiveCampus",
               foreignField: "_id",
               as: "branchDetails",
             },
@@ -118,8 +123,6 @@ const getReportData = async (req, res) => {
       }
 
       if (reportType === "CLASS_SUMMARY") {
-        // This path doesn't rely on campus filtering or lookup, but maintains the base teacher lookup
-
         // Look up Class details
         pipeline.push({
           $lookup: {
@@ -171,17 +174,20 @@ const getReportData = async (req, res) => {
       }
 
       // --- DETAILED ASSIGNMENT LIST (Forced Aggregation Path) ---
-
-      // If reportType is DETAILED_ASSIGNMENT AND branchId was present, we continue the aggregation.
-
       pipeline.push(
-        // Look up Branch Name
+        // FIX: Apply the same $addFields transformation for the Detailed Report
+        {
+          $addFields: {
+            effectiveCampus: {
+              $ifNull: ["$teacherCampus", "$teacherDetails.campus"],
+            },
+          },
+        },
+        // FIX: Look up Branch Name using the new 'effectiveCampus' field
         {
           $lookup: {
             from: "branches",
-            localField: {
-              $ifNull: ["$teacherCampus", "$teacherDetails.campus"],
-            }, // Use direct campus or teacher's campus
+            localField: "effectiveCampus",
             foreignField: "_id",
             as: "branchDetails",
           },
@@ -230,7 +236,7 @@ const getReportData = async (req, res) => {
         // Final Projection to match the find().populate() output keys
         {
           $project: {
-            ID: { $literal: 0 }, // Placeholder for frontend-generated ID
+            ID: { $literal: 0 },
             TEACHER: "$teacherDetails.name",
             CAMPUS: { $ifNull: ["$branchDetails.name", "N/A"] },
             RESPONSIBILITY_TYPE: "$typeDetails.name",
@@ -249,16 +255,11 @@ const getReportData = async (req, res) => {
 
       const data = await ResponsibilityAssignment.aggregate(pipeline);
 
-      // Add the sequential ID in the final step (since it was a placeholder above)
       const formatted = data.map((item, idx) => ({ ...item, ID: idx + 1 }));
 
       return res.json(formatted);
     } else {
       // --- Simple DETAILED_ASSIGNMENT (No branch filter, use efficient find().populate()) ---
-      // filter only contains year/type/class filters (branchId is NOT present here)
-
-      // NOTE: We only use the find().populate() path if NO branch filter is applied,
-      // as the find() query logic is simpler and faster when not dealing with legacy data issues.
 
       const assignments = await ResponsibilityAssignment.find(filter)
         .populate("teacher", "name teacherId")
@@ -287,102 +288,14 @@ const getReportData = async (req, res) => {
     }
   } catch (error) {
     console.error("CRITICAL REPORT FETCH ERROR:", error);
+    // Returning a clearer message to the frontend when a hard failure occurs
     return res.status(500).json({
       message:
-        "An internal server error occurred during report generation. Check server logs.",
+        "An internal server error occurred during report data retrieval. Please check the server logs for the full stack trace.",
     });
-  }
-};
-
-// ----------------------------
-// 2. EXPORT TO EXCEL (Requires the core data function)
-// ----------------------------
-const exportToExcel = async (req, res) => {
-  const { year, typeId, classId, reportType, branchId } = req.query;
-
-  const pseudoReq = {
-    query: { year, typeId, classId, reportType, branchId, status: "Assigned" },
-  };
-  const pseudoRes = {
-    json: (data) => data,
-    status: () => pseudoRes,
-    send: () => {},
-  };
-
-  const data = await getReportData(pseudoReq, pseudoRes);
-
-  if (!Array.isArray(data) || data.length === 0)
-    return res.status(404).send({ message: "No data found to export." });
-
-  try {
-    const workbook = new exceljs.Workbook();
-    const worksheet = workbook.addWorksheet("Responsibility Report");
-
-    worksheet.columns = Object.keys(data[0]).map((key) => ({
-      header: key.replace(/([A-Z])/g, " $1").trim(),
-      key,
-      width:
-        key.includes("Responsibility") || key.includes("Teacher") ? 25 : 15,
-    }));
-
-    worksheet.addRows(data);
-
-    worksheet.getRow(1).eachCell((cell) => {
-      cell.font = { bold: true, color: { argb: "FFFFFF" } };
-      cell.fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: "1E3A8A" },
-      };
-      cell.alignment = { horizontal: "center" };
-    });
-
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    );
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename=${reportType || "Detailed"}_Report_${
-        year || "All"
-      }.xlsx`
-    );
-
-    await workbook.xlsx.write(res);
-    res.end();
-  } catch (error) {
-    res.status(500).send({ message: "Excel export error: " + error.message });
-  }
-};
-
-// ----------------------------
-// 3. PDF DATA (Used for client-side PDF generation)
-// ----------------------------
-const getPDFDataForClient = async (req, res) => {
-  const { year, typeId, classId, status, reportType, branchId } = req.query;
-
-  const pseudoReq = {
-    query: { year, typeId, classId, status, reportType, branchId },
-  };
-  const pseudoRes = {
-    json: (data) => data,
-    status: () => pseudoRes,
-    send: () => {},
-  };
-
-  try {
-    const data = await getReportData(pseudoReq, pseudoRes);
-    return res.json(data);
-  } catch (error) {
-    console.error("PDF Fetch Error:", error);
-    return res
-      .status(500)
-      .json({ message: "Error fetching PDF data: " + error.message });
   }
 };
 
 module.exports = {
   getReportData,
-  exportToExcel,
-  getPDFDataForClient,
 };
