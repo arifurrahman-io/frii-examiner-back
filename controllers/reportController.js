@@ -381,6 +381,8 @@ const exportCustomReportToPDF = async (req, res) => {
         }
       );
       doc.moveDown(1.2);
+      // Reset cursor below header to avoid overlap with table header
+      doc.y = MARGIN + 40;
     };
 
     const drawTableHeader = (y) => {
@@ -416,17 +418,20 @@ const exportCustomReportToPDF = async (req, res) => {
         .strokeColor(lineColor)
         .stroke();
       doc.restore();
+      // Set body font for rows
+      doc.font("Helvetica").fontSize(fontSizeBody).fillColor("#111827");
       return finalY;
     };
 
     const drawFooter = () => {
       if (!doc.page) return;
       const availableWidth = doc.page.width - 2 * MARGIN;
-      const bottomY = doc.page.height - 40;
+      const bottomY = doc.page.height - MARGIN; // bottom within margin
       doc.save();
       doc.font("Helvetica").fontSize(7).fillColor("#606060");
       doc.text(footerText, MARGIN, bottomY, {
         width: availableWidth * 0.7,
+        align: "left",
         lineBreak: false,
       });
       doc.text(`Page ${pageNumber}`, MARGIN + availableWidth * 0.7, bottomY, {
@@ -437,26 +442,29 @@ const exportCustomReportToPDF = async (req, res) => {
       doc.restore();
     };
 
-    const addNewPage = () => {
-      doc.addPage();
+    const addNewPage = (isFirst = false) => {
+      if (!isFirst) doc.addPage();
       pageNumber++;
       drawHeader();
       return doc.y;
     };
 
     // DRAW TABLE
-    let currentY = addNewPage();
+    let currentY = addNewPage(true); // initialize first page without adding a blank one
     currentY = drawTableHeader(currentY) + 4;
 
-    const bottomLimit = () => (doc.page ? doc.page.height - 50 : 700);
+    const bottomLimit = () => (doc.page ? doc.page.height - MARGIN : 700);
 
     mappedData.forEach((row, i) => {
       if (currentY + rowHeight > bottomLimit()) {
+        // Close current page
         drawFooter();
+        // New page
         currentY = addNewPage();
         currentY = drawTableHeader(currentY) + 4;
       }
 
+      // Zebra striping
       if (i % 2 === 1) {
         doc
           .save()
@@ -465,6 +473,7 @@ const exportCustomReportToPDF = async (req, res) => {
           .restore();
       }
 
+      // Draw row cells
       let x = MARGIN;
       for (let j = 0; j < row.length; j++) {
         const text = row[j] == null ? "N/A" : String(row[j]);
@@ -489,6 +498,7 @@ const exportCustomReportToPDF = async (req, res) => {
         .strokeColor(lineColor)
         .lineWidth(0.5)
         .stroke();
+
       currentY += rowHeight;
     });
 
