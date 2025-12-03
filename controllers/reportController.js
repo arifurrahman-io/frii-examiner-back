@@ -1,10 +1,9 @@
-// reportController.js
 const mongoose = require("mongoose");
 const ResponsibilityAssignment = require("../models/ResponsibilityAssignmentModel");
-const PDFDocument = require("pdfkit");
 const ResponsibilityType = require("../models/ResponsibilityTypeModel");
+const jsPDF = require("jspdf").jsPDF;
+require("jspdf-autotable");
 
-// Helper to check if data is a valid array
 const ArrayOfData = (data) => Array.isArray(data) && data.length > 0;
 
 // ----------------------------
@@ -16,10 +15,14 @@ const getReportData = async (req, res) => {
 
     let filter = {};
     if (year) filter.year = parseInt(year);
-    if (typeId && mongoose.Types.ObjectId.isValid(typeId))
+
+    if (typeId && mongoose.Types.ObjectId.isValid(typeId)) {
       filter.responsibilityType = new mongoose.Types.ObjectId(typeId);
-    if (classId && mongoose.Types.ObjectId.isValid(classId))
+    }
+    if (classId && mongoose.Types.ObjectId.isValid(classId)) {
       filter.targetClass = new mongoose.Types.ObjectId(classId);
+    }
+
     if (status) filter.status = status;
     if (!status) filter.status = { $ne: "Cancelled" };
 
@@ -39,11 +42,12 @@ const getReportData = async (req, res) => {
         },
       });
       pipeline.push({
-        $unwind: { path: "$teacherDetails", preserveNullAndEmptyArrays: false },
+        $unwind: { path: "$teacherDetails", preserveNullAndEmptyArrays: true },
       });
 
       if (branchId && mongoose.Types.ObjectId.isValid(branchId)) {
         const branchObjectId = new mongoose.Types.ObjectId(branchId);
+
         pipeline.push({
           $match: {
             $or: [
@@ -54,7 +58,6 @@ const getReportData = async (req, res) => {
         });
       }
 
-      // --- CAMPUS SUMMARY REPORT ---
       if (reportType === "CAMPUS_SUMMARY") {
         pipeline.push(
           {
@@ -111,57 +114,53 @@ const getReportData = async (req, res) => {
         return res.json(data);
       }
 
-      // --- CLASS SUMMARY REPORT ---
       if (reportType === "CLASS_SUMMARY") {
-        pipeline.push(
-          {
-            $lookup: {
-              from: "classes",
-              localField: "targetClass",
-              foreignField: "_id",
-              as: "classDetails",
-            },
+        pipeline.push({
+          $lookup: {
+            from: "classes",
+            localField: "targetClass",
+            foreignField: "_id",
+            as: "classDetails",
           },
-          {
-            $unwind: {
-              path: "$classDetails",
-              preserveNullAndEmptyArrays: true,
-            },
+        });
+        pipeline.push({
+          $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true },
+        });
+
+        pipeline.push({
+          $lookup: {
+            from: "responsibilitytypes",
+            localField: "responsibilityType",
+            foreignField: "_id",
+            as: "typeDetails",
           },
-          {
-            $lookup: {
-              from: "responsibilitytypes",
-              localField: "responsibilityType",
-              foreignField: "_id",
-              as: "typeDetails",
+        });
+        pipeline.push({ $unwind: "$typeDetails" });
+
+        pipeline.push({
+          $group: {
+            _id: {
+              class: { $ifNull: ["$classDetails.name", "N/A"] },
+              type: "$responsibilityType",
             },
+            totalAssignments: { $sum: 1 },
           },
-          { $unwind: "$typeDetails" },
-          {
-            $group: {
-              _id: {
-                class: { $ifNull: ["$classDetails.name", "N/A"] },
-                type: "$responsibilityType",
-              },
-              totalAssignments: { $sum: 1 },
-            },
+        });
+
+        pipeline.push({
+          $project: {
+            _id: 0,
+            Class: "$_id.class",
+            ResponsibilityType: "$typeDetails.name",
+            TotalAssignments: "$totalAssignments",
           },
-          {
-            $project: {
-              _id: 0,
-              Class: "$_id.class",
-              ResponsibilityType: "$typeDetails.name",
-              TotalAssignments: "$totalAssignments",
-            },
-          },
-          { $sort: { Class: 1, ResponsibilityType: 1 } }
-        );
+        });
+        pipeline.push({ $sort: { Class: 1, ResponsibilityType: 1 } });
 
         const data = await ResponsibilityAssignment.aggregate(pipeline);
         return res.json(data);
-      }
+      } // --- DETAILED ASSIGNMENT REPORT (Aggregation Path) ---
 
-      // --- DETAILED ASSIGNMENT REPORT (Aggregation Path) ---
       pipeline.push(
         {
           $addFields: {
@@ -215,6 +214,7 @@ const getReportData = async (req, res) => {
             preserveNullAndEmptyArrays: true,
           },
         },
+
         {
           $project: {
             ID: { $literal: 0 },
@@ -238,7 +238,6 @@ const getReportData = async (req, res) => {
       const formatted = data.map((item, idx) => ({ ...item, ID: idx + 1 }));
       return res.json(formatted);
     } else {
-      // --- Simple DETAILED_ASSIGNMENT (No aggregation needed) ---
       const assignments = await ResponsibilityAssignment.find(filter)
         .populate("teacher", "name teacherId")
         .populate("teacherCampus", "name")
@@ -272,36 +271,47 @@ const getReportData = async (req, res) => {
 };
 
 // ----------------------------
-// 2️⃣ EXPORT CUSTOM PDF REPORT
+// 2️⃣ EXPORT CUSTOM PDF REPORT (CUSTOM jsPDF Implementation)
 // ----------------------------
 const exportCustomReportToPDF = async (req, res) => {
   const { year, typeId } = req.query;
 
   try {
-    // Fetch responsibility name
+    // --- 1. Fetch Report Data & Setup Metadata ---
     let responsibilityName = "N/A";
-    if (typeId && mongoose.Types.ObjectId.isValid(typeId)) {
-      const respType = await ResponsibilityType.findById(typeId).select("name");
-      responsibilityName = respType ? respType.name : typeId;
+    if (mongoose.Types.ObjectId.isValid(typeId)) {
+      const responsibilityType = await ResponsibilityType.findById(
+        typeId
+      ).select("name");
+      responsibilityName = responsibilityType
+        ? responsibilityType.name
+        : typeId;
     } else if (typeId) responsibilityName = typeId;
 
-    // Determine report title
+    let reportTitle = "Examiners' List";
     const questionSetterPrefixes = ["Q-HY", "Q-Pre-Test", "Q-Annual", "Q-Test"];
-    const isQuestionSetter =
-      questionSetterPrefixes.some((p) =>
-        responsibilityName.toUpperCase().startsWith(p.toUpperCase())
-      ) || responsibilityName.toUpperCase().startsWith("Q-");
-    const reportTitle = isQuestionSetter
-      ? "Question Setters' List"
-      : "Examiners' List";
+    if (
+      questionSetterPrefixes.some((prefix) =>
+        responsibilityName.toUpperCase().startsWith(prefix.toUpperCase())
+      )
+    ) {
+      reportTitle = "Question Setters' List";
+    }
 
-    // Footer text
     const now = new Date();
-    const footerText = `Report generated by FRII Exam Management Software on ${now.toLocaleDateString(
-      "en-GB"
-    )} ${now.toLocaleTimeString("en-GB", { hour12: false })}`;
+    const datePart = now.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+    const timePart = now.toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const footerText = `The report generated by FRII Exam Management Software | ${datePart} | ${timePart}`;
 
-    // Fetch detailed report data
     const pseudoReq = {
       query: {
         ...req.query,
@@ -309,207 +319,238 @@ const exportCustomReportToPDF = async (req, res) => {
         status: "Assigned",
       },
     };
+    let rawData = [];
     const pseudoRes = {
-      json: (data) => data,
-      status: () => pseudoRes,
+      json: (data) => {
+        rawData = data;
+        return data;
+      },
+      status: (code) => pseudoRes,
       send: () => {},
     };
-    const rawData = await getReportData(pseudoReq, pseudoRes);
+    await getReportData(pseudoReq, pseudoRes);
 
     if (!ArrayOfData(rawData))
       return res.status(404).json({ message: "No data found to export." });
 
-    const FINAL_COLUMNS = [
-      "ID",
+    // --- 2. Prepare Data for Custom Table ---
+
+    const columnHeaders = [
+      "S.L.",
       "CLASS",
       "SUBJECT",
       "TEACHER",
       "CAMPUS",
       "NOTE",
     ];
-    const mappedData = rawData.map((item) => [
-      item.ID,
-      item.CLASS,
-      item.SUBJECT,
-      item.TEACHER,
-      item.CAMPUS,
+    const columnWidths = [35, 50, 50, 180, 80, 90]; // pt units
+    const rowHeight = 18;
+    const headerHeight = 20;
+    const MARGIN = 50;
+    const PADDING = 4;
+
+    // 💡 ফিক্স: হেডার ও টেবিলের দূরত্ব কমাতে মান পরিবর্তন করা হলো
+    const TABLE_START_Y = MARGIN + 40; // নতুন মান (90pt)
+
+    const PAGE_END_Y_SAFE = 595.28 * 0.75 - 50; // A4 height, safe zone at 50pt from bottom
+
+    // Map data rows, filling in the blank 'NOTE' field and converting to array of cell values
+    const rows = rawData.map((item) => [
+      item.ID.toString(),
+      item.CLASS || "N/A",
+      item.SUBJECT || "N/A",
+      item.TEACHER || "N/A",
+      item.CAMPUS || "N/A",
       "",
     ]);
 
-    // PDF setup
-    const doc = new PDFDocument({
-      size: "A4",
-      margin: 50,
-      autoFirstPage: false,
+    // --- 3. Initialize PDF ---
+    const doc = new jsPDF({
+      unit: "pt",
+      format: "a4",
+      orientation: "p",
     });
+
+    const pageWidth = doc.internal.pageSize.width;
+    const availableWidth = pageWidth - 2 * MARGIN;
+
+    // --- 4. Helper Functions for Page Elements ---
+
+    const drawHeader = (doc, y) => {
+      let currentX = MARGIN;
+
+      // Draw Header Background (Fill Color: #1E3A8A)
+      doc
+        .setFillColor(30, 58, 138)
+        .rect(MARGIN, y, availableWidth, headerHeight, "F");
+
+      doc.setFontSize(8);
+      doc.setTextColor(255); // White text
+
+      // Draw header text and vertical lines
+      columnHeaders.forEach((header, i) => {
+        const width = columnWidths[i];
+        // Text alignment in cell
+        doc.text(header, currentX + PADDING, y + headerHeight / 2 + 3);
+
+        // Draw vertical line on the right side of the column
+        doc
+          .setDrawColor(160, 174, 192)
+          .setLineWidth(0.5)
+          .line(currentX, y, currentX, y + headerHeight);
+        currentX += width;
+      });
+      // Draw final right border
+      doc
+        .setDrawColor(160, 174, 192)
+        .setLineWidth(0.5)
+        .line(
+          MARGIN + availableWidth,
+          y,
+          MARGIN + availableWidth,
+          y + headerHeight
+        );
+
+      // Draw bottom horizontal line
+      doc
+        .setDrawColor(160, 174, 192)
+        .setLineWidth(0.5)
+        .line(
+          MARGIN,
+          y + headerHeight,
+          MARGIN + availableWidth,
+          y + headerHeight
+        );
+
+      return y + headerHeight;
+    };
+
+    const drawTitleBlock = (doc) => {
+      doc.setFontSize(16);
+      doc.setTextColor(30, 58, 138); // #1E3A8A
+      doc.text(reportTitle, pageWidth / 2, MARGIN, { align: "center" });
+
+      doc.setFontSize(9);
+      doc.setTextColor(75, 85, 99); // #4B5563
+      doc.text(
+        `Year: ${year} | Responsibility Type: ${responsibilityName}`,
+        pageWidth / 2,
+        MARGIN + 18,
+        { align: "center" }
+      );
+    };
+
+    const drawFooter = (doc, pageNumber) => {
+      doc.setFontSize(7);
+      doc.setTextColor(96, 96, 96); // #606060
+      const footerY = doc.internal.pageSize.height - 30;
+
+      // Footer Text (Left)
+      doc.text(footerText, MARGIN, footerY);
+
+      // Page Number (Right)
+      doc.text(`Page ${pageNumber}`, pageWidth - MARGIN, footerY, {
+        align: "right",
+      });
+    };
+
+    // --- 5. Drawing Execution ---
+
+    let currentY = 0;
+
+    // 💡 ফিক্স: isFirstPage প্যারামিটার যোগ করা হলো
+    const startNewPage = (isFirstPage = false) => {
+      if (!isFirstPage) {
+        drawFooter(doc, doc.internal.getNumberOfPages());
+        doc.addPage();
+      }
+      drawTitleBlock(doc);
+      currentY = drawHeader(doc, TABLE_START_Y);
+    };
+
+    // প্রথম পেজ শুরু করা
+    startNewPage(true);
+
+    // Loop through all data rows
+    rows.forEach((row, rowIdx) => {
+      // --- Page Break Check ---
+      // যদি পরের রো সেফ জোন অতিক্রম করে, নতুন পেজ শুরু করুন
+      if (currentY + rowHeight > doc.internal.pageSize.height - 50) {
+        startNewPage();
+      }
+
+      let currentX = MARGIN;
+
+      // Draw Row Background (Alternate Row Color: #F3F4F6)
+      if (rowIdx % 2 !== 0) {
+        doc
+          .setFillColor(243, 244, 246)
+          .rect(MARGIN, currentY, availableWidth, rowHeight, "F");
+      }
+
+      doc.setFontSize(7);
+      doc.setTextColor(0); // Black text
+
+      // Draw cells and borders
+      row.forEach((cellData, i) => {
+        const width = columnWidths[i];
+
+        // Draw Cell Content (Text is clipped by column width)
+        doc.text(cellData, currentX + PADDING, currentY + rowHeight / 2 + 2, {
+          maxWidth: width - 2 * PADDING,
+        });
+
+        // Draw Vertical Lines
+        doc.setDrawColor(160, 174, 192).setLineWidth(0.5);
+        doc.line(currentX, currentY, currentX, currentY + rowHeight);
+
+        currentX += width;
+      });
+
+      // Draw final vertical border on the right
+      doc.line(
+        MARGIN + availableWidth,
+        currentY,
+        MARGIN + availableWidth,
+        currentY + rowHeight
+      );
+
+      // Draw horizontal bottom line for the row
+      doc.line(
+        MARGIN,
+        currentY + rowHeight,
+        MARGIN + availableWidth,
+        currentY + rowHeight
+      );
+
+      currentY += rowHeight;
+    });
+
+    // Add footer to the last page (since it wasn't triggered by a page break)
+    drawFooter(doc, doc.internal.getNumberOfPages());
+
+    // --- 6. Send PDF Stream ---
+    const buffer = doc.output("arraybuffer");
+
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
       `inline; filename=Custom_Assignment_Report_${year || "All"}.pdf`
     );
+    res.setHeader("Content-Length", buffer.byteLength);
     res.setHeader("Cache-Control", "no-cache");
-    doc.pipe(res);
 
-    // Constants
-    const MARGIN = 50;
-    const rowHeight = 18;
-    const headerHeight = 20;
-    const headerColor = "#1E3A8A";
-    const cellPadding = 5;
-    const fontSizeBody = 7;
-    const fontSizeHeader = 8;
-    const lineColor = "#A0AEC0";
-    const widthMap = [0.08, 0.1, 0.1, 0.35, 0.17, 0.2];
-    let pageNumber = 0;
+    res.send(Buffer.from(buffer));
+  } catch (error) {
+    console.error("Custom PDF Export Failed (jsPDF - Custom):", error);
 
-    // Header/Footer functions
-    const drawHeader = () => {
-      if (!doc.page) return;
-      const availableWidth = doc.page.width - 2 * MARGIN;
-      doc.font("Helvetica-Bold").fontSize(16).fillColor("#1E3A8A");
-      doc.text(reportTitle, MARGIN, MARGIN - 10, {
-        align: "center",
-        width: availableWidth,
+    if (!res.headersSent) {
+      return res.status(500).json({
+        message: `PDF Generation Failed: ${
+          error.message || "An unknown error occurred during PDF streaming."
+        }. Check server console for details.`,
       });
-      doc.moveDown(0.5);
-      doc.font("Helvetica").fontSize(9).fillColor("#4B5563");
-      doc.text(
-        `Year: ${year || "All"} | Responsibility Type: ${responsibilityName}`,
-        {
-          align: "center",
-          width: availableWidth,
-        }
-      );
-      doc.moveDown(1.2);
-      // Reset cursor below header to avoid overlap with table header
-      doc.y = MARGIN + 40;
-    };
-
-    const drawTableHeader = (y) => {
-      if (!doc.page) return y;
-      const availableWidth = doc.page.width - 2 * MARGIN;
-      const finalY = y + headerHeight;
-      let x = MARGIN;
-      doc.save();
-      doc.rect(MARGIN, y, availableWidth, headerHeight).fill(headerColor);
-      doc.fillColor("#FFFFFF").fontSize(fontSizeHeader).font("Helvetica-Bold");
-      for (let i = 0; i < FINAL_COLUMNS.length; i++) {
-        const width = widthMap[i] * availableWidth;
-        doc.text(FINAL_COLUMNS[i], x + cellPadding, y + cellPadding, {
-          width: width - 2 * cellPadding,
-          align: "left",
-          ellipsis: true,
-        });
-        doc
-          .moveTo(x + width, y)
-          .lineTo(x + width, finalY)
-          .strokeColor(lineColor)
-          .stroke();
-        x += width;
-      }
-      doc
-        .moveTo(MARGIN, y)
-        .lineTo(MARGIN + availableWidth, y)
-        .strokeColor(lineColor)
-        .stroke();
-      doc
-        .moveTo(MARGIN, finalY)
-        .lineTo(MARGIN + availableWidth, finalY)
-        .strokeColor(lineColor)
-        .stroke();
-      doc.restore();
-      // Set body font for rows
-      doc.font("Helvetica").fontSize(fontSizeBody).fillColor("#111827");
-      return finalY;
-    };
-
-    const drawFooter = () => {
-      if (!doc.page) return;
-      const availableWidth = doc.page.width - 2 * MARGIN;
-      const bottomY = doc.page.height - MARGIN; // bottom within margin
-      doc.save();
-      doc.font("Helvetica").fontSize(7).fillColor("#606060");
-      doc.text(footerText, MARGIN, bottomY, {
-        width: availableWidth * 0.7,
-        align: "left",
-        lineBreak: false,
-      });
-      doc.text(`Page ${pageNumber}`, MARGIN + availableWidth * 0.7, bottomY, {
-        width: availableWidth * 0.3,
-        align: "right",
-        lineBreak: false,
-      });
-      doc.restore();
-    };
-
-    const addNewPage = (isFirst = false) => {
-      if (!isFirst) doc.addPage();
-      pageNumber++;
-      drawHeader();
-      return doc.y;
-    };
-
-    // DRAW TABLE
-    let currentY = addNewPage(true); // initialize first page without adding a blank one
-    currentY = drawTableHeader(currentY) + 4;
-
-    const bottomLimit = () => (doc.page ? doc.page.height - MARGIN : 700);
-
-    mappedData.forEach((row, i) => {
-      if (currentY + rowHeight > bottomLimit()) {
-        // Close current page
-        drawFooter();
-        // New page
-        currentY = addNewPage();
-        currentY = drawTableHeader(currentY) + 4;
-      }
-
-      // Zebra striping
-      if (i % 2 === 1) {
-        doc
-          .save()
-          .rect(MARGIN, currentY, doc.page.width - 2 * MARGIN, rowHeight)
-          .fill("#F3F4F6")
-          .restore();
-      }
-
-      // Draw row cells
-      let x = MARGIN;
-      for (let j = 0; j < row.length; j++) {
-        const text = row[j] == null ? "N/A" : String(row[j]);
-        const width = widthMap[j] * (doc.page.width - 2 * MARGIN);
-        doc.text(text, x + cellPadding, currentY + cellPadding, {
-          width: Math.max(width - 2 * cellPadding, 10),
-          align: "left",
-          ellipsis: true,
-          lineBreak: false,
-        });
-        doc
-          .moveTo(x + width, currentY)
-          .lineTo(x + width, currentY + rowHeight)
-          .strokeColor(lineColor)
-          .lineWidth(0.5)
-          .stroke();
-        x += width;
-      }
-      doc
-        .moveTo(MARGIN, currentY + rowHeight)
-        .lineTo(doc.page.width - MARGIN, currentY + rowHeight)
-        .strokeColor(lineColor)
-        .lineWidth(0.5)
-        .stroke();
-
-      currentY += rowHeight;
-    });
-
-    drawFooter();
-    doc.end();
-  } catch (err) {
-    console.error("Custom PDF Export Failed:", err);
-    if (!res.headersSent)
-      res
-        .status(500)
-        .json({ message: "PDF Generation Failed. See server logs." });
+    }
   }
 };
 
