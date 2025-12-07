@@ -604,7 +604,7 @@ const exportCampusWiseYearlyPDF = async (req, res) => {
         // Footer: page number and generated date
         const pageCount = doc.internal.getNumberOfPages();
         const page = doc.internal.getCurrentPageInfo().pageNumber;
-        doc.setFontSize(8);
+        doc.setFontSize(6);
         doc.setTextColor(120);
         const footerText = `Generated on: ${new Date().toLocaleDateString(
           "en-GB"
