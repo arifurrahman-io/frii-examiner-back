@@ -1,4 +1,3 @@
-// controllers/reportController.js
 const mongoose = require("mongoose");
 const ResponsibilityAssignment = require("../models/ResponsibilityAssignmentModel");
 const ResponsibilityType = require("../models/ResponsibilityTypeModel");
@@ -21,6 +20,46 @@ const RESPONSIBILITY_TYPES = [
   "Q-Test",
   "E-Test",
 ];
+
+// --- 🚀 NEW: Roman Numeral Map and Conversion Logic (Module-Scoped) ---
+const ROMAN_MAP = {
+  ONE: "I",
+  TWO: "II",
+  THREE: "III",
+  FOUR: "IV",
+  FIVE: "V",
+  SIX: "VI",
+  SEVEN: "VII",
+  EIGHT: "VIII",
+  NINE: "IX",
+  TEN: "X",
+};
+
+const applyRomanNumerals = (assignments) => {
+  if (!assignments || typeof assignments !== "object") return assignments;
+
+  const newAssignments = {};
+  for (const typeCode in assignments) {
+    if (Array.isArray(assignments[typeCode])) {
+      newAssignments[typeCode] = assignments[typeCode].map((detail) => {
+        // detail format is "CLASS-SUBJECT" (e.g., "FIVE-Math")
+        // We split, convert the Class part, and then rejoin.
+        const parts = detail.split("-");
+        if (parts.length >= 2) {
+          const className = parts[0].toUpperCase();
+          const subjectName = parts.slice(1).join("-"); // Rejoin subject part in case of hyphenated subject names
+          const romanClass = ROMAN_MAP[className] || className;
+          return `${romanClass}-${subjectName}`;
+        }
+        return detail;
+      });
+    } else {
+      newAssignments[typeCode] = assignments[typeCode];
+    }
+  }
+  return newAssignments;
+};
+// --- END NEW LOGIC ---
 
 // ----------------------------
 // helper: safely convert to ObjectId if string looks like one
@@ -276,7 +315,7 @@ const getReportData = async (req, res) => {
 };
 
 // ----------------------------
-// helper: fetchYearlyReportData updated to use typeDetails.name and proper ObjectId handling
+// helper: fetchYearlyReportData updated for Class-Subject order and Roman conversion
 // ----------------------------
 const fetchYearlyReportData = async (
   currentYear,
@@ -353,14 +392,14 @@ const fetchYearlyReportData = async (
       },
       { $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true } },
 
-      // assembly of a display string for each assignment
+      // 🚀 FIX 1 (ORDER): Concatenation order: Class-Subject
       {
         $addFields: {
           assignmentDetail: {
             $concat: [
-              { $ifNull: ["$subjectDetails.name", "Sub-N/A"] },
+              { $ifNull: ["$classDetails.name", "Class-N/A"] }, // Class first
               "-",
-              { $ifNull: ["$classDetails.name", "Class-N/A"] },
+              { $ifNull: ["$subjectDetails.name", "Sub-N/A"] }, // Subject second
             ],
           },
           typeName: "$typeDetails.name", // e.g., "Q-HY"
@@ -451,6 +490,15 @@ const fetchYearlyReportData = async (
       campusName: campusMap.get(String(r.campus)) || "N/A",
     }));
 
+    // 🚀 FIX 2 (ROMAN): Post-aggregation Roman numeral conversion and application
+    results = results.map((r) => ({
+      ...r,
+      yearlyAssignments: r.yearlyAssignments.map((ya) => ({
+        ...ya,
+        assignments: applyRomanNumerals(ya.assignments),
+      })),
+    }));
+
     return results;
   } catch (error) {
     console.error("Aggregation Failed:", error);
@@ -496,7 +544,8 @@ const exportCampusWiseYearlyPDF = async (req, res) => {
       const currentYearRow = {
         SL: serial,
         Campus: teacherResult.campusName || "N/A",
-        Teacher: teacherResult.teacherName || "N/A",
+        // 🚀 FIX 3 (TEACHER NAME): Ensure teacher name is uppercase in PDF data
+        Teacher: (teacherResult.teacherName || "N/A").toUpperCase(),
         Year: currentYear,
       };
 
@@ -546,18 +595,21 @@ const exportCampusWiseYearlyPDF = async (req, res) => {
     // Create PDF with autoTable for consistent layout/padding
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "l" });
 
+    // 1. Initial Variable Declarations (Used throughout the function)
+    const pageWidth = doc.internal.pageSize.getWidth(); // Original Declaration
+    const margin = { top: 50, right: 18, bottom: 40, left: 18 }; // Original Declaration
+
     // Document metadata and title
     doc.setProperties({ title: `Yearly Assignment Report ${currentYear}` });
-    const pageWidth = doc.internal.pageSize.getWidth();
     doc.setFontSize(14);
     doc.setTextColor(40);
     doc.text("Yearly Report", pageWidth / 2, 30, { align: "center" });
 
     // Define theme/spacing
-    const margin = { top: 50, right: 18, bottom: 40, left: 18 };
     const styles = {
-      fontSize: 9,
-      cellPadding: { top: 6, right: 6, bottom: 6, left: 6 }, // horizontal + vertical padding
+      // 🚀 FIX: Set vertical alignment to middle and reduced font size
+      fontSize: 7.5,
+      cellPadding: { top: 4, right: 4, bottom: 4, left: 4 },
       overflow: "linebreak",
       valign: "middle",
       halign: "left",
@@ -572,16 +624,16 @@ const exportCampusWiseYearlyPDF = async (req, res) => {
       fontStyle: "bold",
       halign: "center",
       valign: "middle",
-      fontSize: 10,
+      fontSize: 9,
     };
 
     // Column widths: compress SL and Campus
     // We'll set columnStyles by index
     const columnStyles = {
-      0: { cellWidth: 28 }, // Sl.
+      0: { cellWidth: 28, halign: "center" }, // Sl. (Center aligned)
       1: { cellWidth: 70 }, // Campus
       2: { cellWidth: 100 }, // Teacher's name
-      3: { cellWidth: 35 }, // Year
+      3: { cellWidth: 35, halign: "center" }, // Year (Center aligned)
     };
 
     // For responsibility columns, assign uniform smaller widths
@@ -601,39 +653,80 @@ const exportCampusWiseYearlyPDF = async (req, res) => {
       theme: "grid",
       margin,
       didDrawPage: (data) => {
-        // Footer: page number and generated date
-        const pageCount = doc.internal.getNumberOfPages();
+        // NOTE: This hook draws the 'Page X of Y' with 'Y' being the INCORRECT temporary count.
         const page = doc.internal.getCurrentPageInfo().pageNumber;
+        const pageCount = doc.internal.getNumberOfPages(); // Still incorrect here
+        const footerY = doc.internal.pageSize.getHeight() - 18;
+        const hookMargin = { left: 18, right: 18 }; // Local variable for margins
+
+        // Left Footer: Generated on (static)
         doc.setFontSize(6);
         doc.setTextColor(120);
         const footerText = `Generated on: ${new Date().toLocaleDateString(
           "en-GB"
         )}`;
-        doc.text(
-          footerText,
-          margin.left,
-          doc.internal.pageSize.getHeight() - 18
-        );
+        doc.text(footerText, hookMargin.left, footerY);
+
+        // Right Footer: Draw incorrect "Page X of Y" (Will be overwritten in second pass)
         doc.text(
           `Page ${page} of ${pageCount}`,
-          doc.internal.pageSize.getWidth() - margin.right,
-          doc.internal.pageSize.getHeight() - 18,
+          pageWidth - hookMargin.right,
+          footerY,
           { align: "right" }
         );
       },
-      // optional: alternate row background for readability (zebra)
+      // 🚀 FIX 4: Implement Merging Logic
       didParseCell: function (data) {
         if (data.section === "body") {
-          // every two rows belong to a teacher block; data.row.index starts at 0
           const blockIndex = Math.floor(data.row.index / 2);
+
+          // 1. Alternating row background (zebra) logic
           if (blockIndex % 2 === 1) {
-            data.cell.styles.fillColor = [250, 250, 250]; // very light gray
+            data.cell.styles.fillColor = [250, 250, 250];
+          }
+
+          // 2. Merging logic for the first three columns (Sl, Campus, Teacher)
+          if (data.row.index % 2 === 0) {
+            // First row of the teacher block (Current Year)
+            if (data.column.index <= 2) {
+              // Target Sl (0), Campus (1), Teacher (2)
+              data.cell.rowSpan = 2; // Merge with the row below
+            }
           }
         }
       },
-      // Ensure long text wraps inside a cell
-      bodyStyles: { valign: "top" },
     });
+
+    // 🚀 FIX 5: Second pass to correctly draw the total page count (Y)
+    const finalPageCount = doc.internal.getNumberOfPages();
+    const footerY = doc.internal.pageSize.getHeight() - 18;
+    const coverWidth = 15;
+    const marginRight = 18; // Use the margin value directly
+
+    for (let i = 1; i <= finalPageCount; i++) {
+      doc.setPage(i);
+
+      // Draw white rectangle to cover old incorrect number (e.g., '1' in "Page X of 1")
+      doc.setFillColor(255, 255, 255);
+      // Cover the area where the old incorrect total page count was drawn.
+      doc.rect(
+        pageWidth - marginRight - coverWidth,
+        footerY - 3,
+        coverWidth,
+        7,
+        "F"
+      );
+
+      // Draw the correct final page count
+      doc.setFontSize(6);
+      doc.setTextColor(120);
+      doc.text(
+        `Page ${i} of ${finalPageCount}`,
+        pageWidth - marginRight,
+        footerY,
+        { align: "right" }
+      );
+    }
 
     // Send PDF
     const pdfBuffer = doc.output("arraybuffer");
@@ -781,13 +874,18 @@ const exportCustomReportToPDF = async (req, res) => {
       return aTeacher.localeCompare(bTeacher);
     });
 
+    // Re-index the S.L. after sorting
+    rawData.forEach((item, index) => {
+      item.ID = index + 1;
+    });
+
     // Build columns and rows for autoTable
     const head = [["S.L.", "CLASS", "SUBJECT", "TEACHER", "CAMPUS", "NOTE"]];
     const body = rawData.map((item) => [
       item.ID || "",
       item.CLASS || "N/A",
       item.SUBJECT || "N/A",
-      item.TEACHER || "N/A",
+      (item.TEACHER || "N/A").toUpperCase(), // Teacher name fix applied here
       item.CAMPUS || "N/A",
       "",
     ]);
