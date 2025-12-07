@@ -6,7 +6,7 @@ const ResponsibilityTypeSchema = new mongoose.Schema(
     name: {
       type: String,
       required: true,
-      unique: true, // নিশ্চিত করবে যে একই নামের একাধিক দায়িত্বের প্রকার না থাকে
+      unique: true,
       trim: true,
     },
 
@@ -14,6 +14,15 @@ const ResponsibilityTypeSchema = new mongoose.Schema(
     description: {
       type: String,
       required: false,
+    },
+
+    // 🚀 FIX: Add the required 'code' field for the Yearly Report
+    code: {
+      type: String,
+      required: false, // Make required: true if all duties must have a code
+      unique: true,
+      trim: true,
+      uppercase: true,
     },
 
     // Category: e.g., "Examination", "Administrative", "Co-curricular"
@@ -36,7 +45,7 @@ const ResponsibilityTypeSchema = new mongoose.Schema(
     },
   },
   {
-    timestamps: true, // স্বয়ংক্রিয়ভাবে createdAt এবং updatedAt ফিল্ড যুক্ত করবে
+    timestamps: true,
   }
 );
 

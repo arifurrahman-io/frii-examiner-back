@@ -4,12 +4,15 @@ const express = require("express");
 const {
   getReportData,
   exportCustomReportToPDF,
+  exportCampusWiseYearlyPDF,
 } = require("../controllers/reportController"); // Only importing getReportData
 
 const router = express.Router();
 
 router.get("/data", getReportData);
-// ✅ NEW ROUTE: GET /api/reports/export/custom-pdf (Custom PDF Generation)
+
 router.get("/export/custom-pdf", exportCustomReportToPDF);
+
+router.get("/export/yearly-pdf", exportCampusWiseYearlyPDF);
 
 module.exports = router;
