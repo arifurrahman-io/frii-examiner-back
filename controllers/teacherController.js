@@ -19,22 +19,19 @@ const addTeacher = async (req, res) => {
       return res
         .status(400)
         .json({ message: "Teacher ID or Phone number already registered." });
-    }
+    } // 2. Find the Branch ObjectId
 
-    // 2. Find the Branch ObjectId
     const branch = await Branch.findById(campus);
     if (!branch) {
       return res.status(404).json({ message: "Campus not found." });
-    }
+    } // 3. Create new teacher
 
-    // 3. Create new teacher
     const newTeacher = await Teacher.create({
       teacherId,
       name,
       phone,
       campus: branch._id, // Save the ObjectId
-      designation,
-      // Note: Manual entry requires a password/user creation logic if login is intended
+      designation, // Note: Manual entry requires a password/user creation logic if login is intended
     });
 
     res.status(201).json(newTeacher);
@@ -56,20 +53,17 @@ const getAllTeachers = async (req, res) => {
   let query = {};
 
   if (search) {
-    const searchRegex = { $regex: search, $options: "i" };
+    const searchRegex = { $regex: search, $options: "i" }; // 1. Search Branches for matching names
 
-    // 1. Search Branches for matching names
     const matchingBranches = await Branch.find({ name: searchRegex }).select(
       "_id"
     );
-    const branchIds = matchingBranches.map((branch) => branch._id);
+    const branchIds = matchingBranches.map((branch) => branch._id); // 2. Build the complex search query using $or
 
-    // 2. Build the complex search query using $or
     query = {
       $or: [
         { name: searchRegex },
-        { phone: searchRegex },
-        // 🚀 NEW: Search by Campus ID if matching branches were found
+        { phone: searchRegex }, // 🚀 NEW: Search by Campus ID if matching branches were found
         ...(branchIds.length > 0 ? [{ campus: { $in: branchIds } }] : []),
       ],
     };
@@ -77,16 +71,14 @@ const getAllTeachers = async (req, res) => {
 
   try {
     // 1. Get total count for pagination metadata
-    const totalTeachers = await Teacher.countDocuments(query);
+    const totalTeachers = await Teacher.countDocuments(query); // 2. Fetch paginated teachers with limit and skip
 
-    // 2. Fetch paginated teachers with limit and skip
     const teachers = await Teacher.find(query)
       .limit(limitInt)
       .skip(skip)
       .populate("campus", "name location")
-      .sort({ name: 1 });
+      .sort({ name: 1 }); // 3. রিটার্ন পেজিনেটেড ডেটা
 
-    // 3. রিটার্ন পেজিনেটেড ডেটা
     res.json({
       teachers,
       page: pageInt,
@@ -112,14 +104,12 @@ const getTeacherProfile = async (req, res) => {
 
     if (!teacher) {
       return res.status(404).json({ message: "Teacher not found." });
-    }
+    } // Fetch all responsibilities assigned to this teacher (Mongoose aggregation)
 
-    // Fetch all responsibilities assigned to this teacher (Mongoose aggregation)
     const assignments = await ResponsibilityAssignment.aggregate([
       // 1. ম্যাচিং (Matching)
-      { $match: { teacher: new mongoose.Types.ObjectId(teacherId) } },
+      { $match: { teacher: new mongoose.Types.ObjectId(teacherId) } }, // 2. লুকআপ: দায়িত্বের ধরন (Responsibility Type)
 
-      // 2. লুকআপ: দায়িত্বের ধরন (Responsibility Type)
       {
         $lookup: {
           from: "responsibilitytypes",
@@ -128,9 +118,8 @@ const getTeacherProfile = async (req, res) => {
           as: "typeDetails",
         },
       },
-      { $unwind: "$typeDetails" },
+      { $unwind: "$typeDetails" }, // 3. ✅ লুকআপ: ক্লাসের নাম (Class Name)
 
-      // 3. ✅ লুকআপ: ক্লাসের নাম (Class Name)
       {
         $lookup: {
           from: "classes",
@@ -138,11 +127,9 @@ const getTeacherProfile = async (req, res) => {
           foreignField: "_id",
           as: "classDetails",
         },
-      },
-      // ডেটা না পেলেও রেকর্ডটি ধরে রাখার জন্য preserveNullAndEmptyArrays: true
-      { $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true } },
+      }, // ডেটা না পেলেও রেকর্ডটি ধরে রাখার জন্য preserveNullAndEmptyArrays: true
+      { $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true } }, // 4. ✅ লুকআপ: বিষয়ের নাম (Subject Name)
 
-      // 4. ✅ লুকআপ: বিষয়ের নাম (Subject Name)
       {
         $lookup: {
           from: "subjects",
@@ -153,9 +140,8 @@ const getTeacherProfile = async (req, res) => {
       },
       {
         $unwind: { path: "$subjectDetails", preserveNullAndEmptyArrays: true },
-      },
+      }, // 5. গ্রুপিং (Grouping)
 
-      // 5. গ্রুপিং (Grouping)
       {
         $group: {
           _id: "$year",
@@ -164,8 +150,7 @@ const getTeacherProfile = async (req, res) => {
               // ✅ CRITICAL FIX: Include the assignment's MongoDB ID
               _id: "$_id",
               name: "$typeDetails.name",
-              status: "$status",
-              // ✅ FIX: Populate করা নাম ব্যবহার করা
+              status: "$status", // ✅ FIX: Populate করা নাম ব্যবহার করা
               class: { $ifNull: ["$classDetails.name", "N/A"] },
               subject: { $ifNull: ["$subjectDetails.name", "N/A"] },
             },
@@ -200,9 +185,8 @@ const updateTeacher = async (req, res) => {
     // 1. Basic Validation
     if (!mongoose.Types.ObjectId.isValid(teacherObjectId)) {
       return res.status(400).json({ message: "Invalid Teacher ID format." });
-    }
+    } // 2. Handle unique fields (teacherId and phone) during update
 
-    // 2. Handle unique fields (teacherId and phone) during update
     if (teacherId || phone) {
       const existingTeacher = await Teacher.findOne({
         $or: [{ teacherId }, { phone }],
@@ -218,9 +202,8 @@ const updateTeacher = async (req, res) => {
           .status(400)
           .json({ message: `${field} is already in use by another teacher.` });
       }
-    }
+    } // 3. Handle Campus update
 
-    // 3. Handle Campus update
     if (campus) {
       if (!mongoose.Types.ObjectId.isValid(campus)) {
         return res.status(400).json({ message: "Invalid Campus ID format." });
@@ -229,9 +212,8 @@ const updateTeacher = async (req, res) => {
       if (!branchExists) {
         return res.status(404).json({ message: "Target Campus not found." });
       }
-    }
+    } // 4. Perform the update operation
 
-    // 4. Perform the update operation
     const updatedTeacher = await Teacher.findByIdAndUpdate(
       teacherObjectId,
       { $set: updateFields },
@@ -264,9 +246,8 @@ const bulkUploadTeachers = async (req, res) => {
     const fileBuffer = req.file.buffer;
     const workbook = xlsx.read(fileBuffer, { type: "buffer" });
     const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
+    const worksheet = workbook.Sheets[sheetName]; // JSON এ ডেটা কনভার্ট করা (header: 1 মানে প্রথম row header)
 
-    // JSON এ ডেটা কনভার্ট করা (header: 1 মানে প্রথম row header)
     const rawTeachers = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
 
     const headers = rawTeachers[0].map((h) =>
@@ -275,8 +256,7 @@ const bulkUploadTeachers = async (req, res) => {
     const dataRows = rawTeachers.slice(1);
 
     const teachersToSave = [];
-    const bulkErrors = [];
-    // Fetch all campuses to perform lookups efficiently
+    const bulkErrors = []; // Fetch all campuses to perform lookups efficiently
     const campuses = await Branch.find({}).select("name _id");
 
     for (let i = 0; i < dataRows.length; i++) {
@@ -291,9 +271,8 @@ const bulkUploadTeachers = async (req, res) => {
         campusName: row[headers.indexOf("campus")],
         password: row[headers.indexOf("password")],
         designation: row[headers.indexOf("designation")],
-      };
+      }; // প্রাথমিক ভ্যালিডেশন
 
-      // প্রাথমিক ভ্যালিডেশন
       if (
         !excelData.teacherId ||
         !excelData.name ||
@@ -304,9 +283,8 @@ const bulkUploadTeachers = async (req, res) => {
           `Row ${rowNumber}: Missing required fields (ID, Name, Phone, or Campus).`
         );
         continue;
-      }
+      } // Campus ID Look-up
 
-      // Campus ID Look-up
       const campusObj = campuses.find(
         (c) => c.name.toLowerCase() === excelData.campusName.toLowerCase()
       );
@@ -321,23 +299,19 @@ const bulkUploadTeachers = async (req, res) => {
       teacher.name = excelData.name;
       teacher.phone = excelData.phone;
       teacher.campus = campusObj._id;
-      teacher.designation = excelData.designation;
+      teacher.designation = excelData.designation; // Password Hashing (if included in the bulk sheet)
 
-      // Password Hashing (if included in the bulk sheet)
       if (excelData.password) {
         const salt = await bcrypt.genSalt(10);
         teacher.password = await bcrypt.hash(
           excelData.password.toString(),
           salt
-        );
-        // Note: You must ensure your TeacherModel includes the 'password' field.
+        ); // Note: You must ensure your TeacherModel includes the 'password' field.
       }
 
       teachersToSave.push(teacher);
-    }
+    } // ডাটাবেসে বাল্ক ইনসার্ট // ordered: false allows insertion to continue even if one document fails (e.g., due to duplicate ID)
 
-    // ডাটাবেসে বাল্ক ইনসার্ট
-    // ordered: false allows insertion to continue even if one document fails (e.g., due to duplicate ID)
     const result = await Teacher.insertMany(teachersToSave, { ordered: false });
 
     res.status(200).json({
