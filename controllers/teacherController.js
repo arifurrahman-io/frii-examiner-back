@@ -1,5 +1,5 @@
 const Teacher = require("../models/TeacherModel");
-const Branch = require("../models/BranchModel");
+const Branch = require("../models/BranchModel"); // Branch model is required for campus search
 const ResponsibilityAssignment = require("../models/ResponsibilityAssignmentModel");
 const mongoose = require("mongoose");
 const xlsx = require("xlsx");
@@ -46,25 +46,54 @@ const addTeacher = async (req, res) => {
 // --- ২. সকল শিক্ষক দেখা এবং সার্চ করা (Get All Teachers & Search) ---
 // GET /api/teachers
 const getAllTeachers = async (req, res) => {
-  const { search } = req.query;
+  // 🚀 ফিক্স ১: পেজিনেশন প্যারামিটার গ্রহণ
+  const { search, page = 1, limit = 20 } = req.query;
+
+  const pageInt = parseInt(page);
+  const limitInt = parseInt(limit);
+  const skip = (pageInt - 1) * limitInt;
+
   let query = {};
 
   if (search) {
+    const searchRegex = { $regex: search, $options: "i" };
+
+    // 1. Search Branches for matching names
+    const matchingBranches = await Branch.find({ name: searchRegex }).select(
+      "_id"
+    );
+    const branchIds = matchingBranches.map((branch) => branch._id);
+
+    // 2. Build the complex search query using $or
     query = {
       $or: [
-        { name: { $regex: search, $options: "i" } },
-        { phone: { $regex: search, $options: "i" } },
+        { name: searchRegex },
+        { phone: searchRegex },
+        // 🚀 NEW: Search by Campus ID if matching branches were found
+        ...(branchIds.length > 0 ? [{ campus: { $in: branchIds } }] : []),
       ],
     };
   }
 
   try {
-    // Populate the 'campus' field with actual branch data
+    // 1. Get total count for pagination metadata
+    const totalTeachers = await Teacher.countDocuments(query);
+
+    // 2. Fetch paginated teachers with limit and skip
     const teachers = await Teacher.find(query)
+      .limit(limitInt)
+      .skip(skip)
       .populate("campus", "name location")
       .sort({ name: 1 });
 
-    res.json(teachers);
+    // 3. রিটার্ন পেজিনেটেড ডেটা
+    res.json({
+      teachers,
+      page: pageInt,
+      limit: limitInt,
+      totalPages: Math.ceil(totalTeachers / limitInt),
+      totalTeachers,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
