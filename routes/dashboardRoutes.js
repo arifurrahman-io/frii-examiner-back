@@ -1,32 +1,38 @@
 const express = require("express");
+const router = express.Router();
 const {
   getDashboardSummary,
-  getTopResponsibleTeachers, // ✅ Top Teachers ফাংশন ইমপোর্ট
-  getAssignmentAnalytics, // Import added in previous step
-  getRecentGrantedLeaves, // ✅ FIX: Missing import added
-  getAssignmentByDutyType, // ✅ IMPORT
-  getAssignmentByBranch, // ✅ IMPORT
+  getTopResponsibleTeachers,
+  getRecentGrantedLeaves,
+  getAssignmentByDutyType,
+  getAssignmentByBranch,
 } = require("../controllers/dashboardController");
-const { protect } = require("../middleware/authMiddleware"); // Auth required
+const { protect } = require("../middleware/authMiddleware");
 
-const router = express.Router();
+/**
+ * 🛡️ সকল রাউট 'protect' মিডলওয়্যার দ্বারা সুরক্ষিত।
+ * প্রতিটি ফাংশন এখন বছর-ভিত্তিক (Year-based) ডাটা সাপোর্ট করে।
+ */
 
-// GET /api/dashboard/summary
-router.route("/summary").get(protect, getDashboardSummary);
+// ড্যাশবোর্ড সামারি (KPIs)
+router.get("/summary", protect, getDashboardSummary);
 
-// ✅ NEW ROUTE: GET /api/dashboard/top-teachers
-router.route("/top-teachers").get(protect, getTopResponsibleTeachers);
+// শীর্ষ দায়িত্বপ্রাপ্ত শিক্ষকদের তালিকা
+router.get("/top-teachers", protect, getTopResponsibleTeachers);
 
-// ✅ NEW ROUTE: GET /api/dashboard/assignment-analytics
-router.route("/assignment-analytics").get(protect, getAssignmentAnalytics);
+// সাম্প্রতিক মঞ্জুরকৃত ছুটির তালিকা
+router.get("/recent-granted-leaves", protect, getRecentGrantedLeaves);
 
-// ✅ NEW ROUTE: GET /api/dashboard/recent-granted-leaves
-router.route("/recent-granted-leaves").get(protect, getRecentGrantedLeaves);
+// ডিউটি টাইপ অনুযায়ী অ্যানালিটিক্স (চার্টের জন্য)
+router.get("/assignment-by-type", protect, getAssignmentByDutyType);
 
-// ✅ NEW ROUTE: GET /api/dashboard/assignment-by-type
-router.route("/assignment-by-type").get(protect, getAssignmentByDutyType);
+// ব্রাঞ্চ বা ক্যাম্পাস ভিত্তিক অ্যানালিটিক্স (চার্টের জন্য)
+router.get("/assignment-by-branch", protect, getAssignmentByBranch);
 
-// ✅ NEW ROUTE: GET /api/dashboard/assignment-by-branch
-router.route("/assignment-by-branch").get(protect, getAssignmentByBranch);
+/**
+ * 💡 নোট: আপনার কন্ট্রোলার ফাইলে 'getAssignmentAnalytics' নামে
+ * কোনো ফাংশন এক্সপোর্ট করা নেই, তাই সেটি এখান থেকে সরিয়ে ফেলা হয়েছে
+ * যাতে 'TypeError' না আসে।
+ */
 
 module.exports = router;

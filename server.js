@@ -19,6 +19,7 @@ const subjectRoutes = require("./routes/subjectRoutes");
 const responsibilityTypeRoutes = require("./routes/responsibilityTypeRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const leaveRoutes = require("./routes/leaveRoutes"); // ✅ NEW: Leave Routes
+const users = require("./routes/userRoutes");
 
 // Connect to Database
 connectDB(); // Now, the function runs with a defined MONGO_URI
@@ -42,6 +43,7 @@ app.use("/api/subjects", subjectRoutes);
 app.use("/api/responsibility-types", responsibilityTypeRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/leaves", leaveRoutes); // ✅ NEW: Leave Management Route
+app.use("/api/users", users);
 
 // Define Root Route
 app.get("/", (req, res) => {

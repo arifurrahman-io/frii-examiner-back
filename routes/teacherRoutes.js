@@ -4,32 +4,35 @@ const {
   getAllTeachers,
   getTeacherProfile,
   updateTeacher,
-  bulkUploadTeachers, // ✅ নতুন কন্ট্রোলার ফাংশন
+  addAnnualReport, // 🚀 নতুন কন্ট্রোলার ফাংশন
+  bulkUploadTeachers,
 } = require("../controllers/teacherController");
 
-const { protect, admin } = require("../middleware/authMiddleware"); // ✅ Auth মিডলওয়্যার ইমপোর্ট
-const upload = require("../middleware/uploadMiddleware"); // ✅ Multer (Upload) মিডলওয়্যার ইমপোর্ট
+const { protect, admin, staffOnly } = require("../middleware/authMiddleware");
+const upload = require("../middleware/uploadMiddleware");
 
 const router = express.Router();
 
 // Base Routes: /api/teachers
 router
   .route("/")
-  // GET /api/teachers - সকল শিক্ষক দেখা ও সার্চ করা (লগইন আবশ্যক)
+  // GET /api/teachers - সকল শিক্ষক দেখা ও সার্চ করা (Admin/Incharge/Teacher সবাই পারবে)
   .get(protect, getAllTeachers)
-  // POST /api/teachers - নতুন শিক্ষক যুক্ত করা (অ্যাডমিন আবশ্যক)
-  .post(protect, admin, addTeacher);
+  // POST /api/teachers - নতুন শিক্ষক যুক্ত করা (শুধুমাত্র Admin এবং Incharge পারবে)
+  .post(protect, staffOnly, addTeacher);
+
+// 🚀 NEW ROUTE: বার্ষিক রিপোর্ট যুক্ত করা (Admin এবং Incharge পারবে)
+// POST /api/teachers/:id/report
+router.post("/:id/report", protect, staffOnly, addAnnualReport);
 
 // ID Specific Routes: /api/teachers/:id
 router
   .route("/:id")
-  // GET /api/teachers/:id - একক শিক্ষকের প্রোফাইল দেখা (লগইন আবশ্যক)
-  .get(protect, getTeacherProfile)
-  // PUT /api/teachers/:id - শিক্ষকের তথ্য আপডেট করা (অ্যাডমিন আবশ্যক)
-  .put(protect, admin, updateTeacher);
+  .get(protect, staffOnly, getTeacherProfile)
+  .put(protect, admin, updateTeacher); // 🚀 এখন আর undefined হবে না
 
 // Bulk Upload Route: /api/teachers/bulk-upload
-// POST রিকোয়েস্ট ফাইল আপলোড হ্যান্ডেল করবে (Multer -> Admin -> Controller)
-router.post("/bulk-upload", protect, admin, upload, bulkUploadTeachers); // ✅ বাল্ক আপলোড রুট
+// শুধুমাত্র অ্যাডমিন বাল্ক আপলোড করতে পারবে
+router.post("/bulk-upload", protect, admin, upload, bulkUploadTeachers);
 
 module.exports = router;
