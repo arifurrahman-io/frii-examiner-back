@@ -5,6 +5,7 @@ const {
   getReportData,
   exportCustomReportToPDF,
   exportCampusWiseYearlyPDF,
+  exportCampusRoutinePDF,
 } = require("../controllers/reportController"); // Only importing getReportData
 
 const router = express.Router();
@@ -14,5 +15,6 @@ router.get("/data", getReportData);
 router.get("/export/custom-pdf", exportCustomReportToPDF);
 
 router.get("/export/yearly-pdf", exportCampusWiseYearlyPDF);
+router.get("/export/campus-routine", exportCampusRoutinePDF);
 
 module.exports = router;

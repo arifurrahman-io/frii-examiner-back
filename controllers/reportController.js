@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const ResponsibilityAssignment = require("../models/ResponsibilityAssignmentModel");
 const ResponsibilityType = require("../models/ResponsibilityTypeModel");
+const Routine = require("../models/RoutineModel");
 const { jsPDF } = require("jspdf");
 require("jspdf-autotable");
 
@@ -21,7 +22,7 @@ const RESPONSIBILITY_TYPES = [
   "E-Test",
 ];
 
-// --- 🚀 NEW: Roman Numeral Map and Conversion Logic (Module-Scoped) ---
+// --- 🚀 Roman Numeral Map and Conversion Logic ---
 const ROMAN_MAP = {
   ONE: "I",
   TWO: "II",
@@ -42,12 +43,10 @@ const applyRomanNumerals = (assignments) => {
   for (const typeCode in assignments) {
     if (Array.isArray(assignments[typeCode])) {
       newAssignments[typeCode] = assignments[typeCode].map((detail) => {
-        // detail format is "CLASS-SUBJECT" (e.g., "FIVE-Math")
-        // We split, convert the Class part, and then rejoin.
         const parts = detail.split("-");
         if (parts.length >= 2) {
           const className = parts[0].toUpperCase();
-          const subjectName = parts.slice(1).join("-"); // Rejoin subject part in case of hyphenated subject names
+          const subjectName = parts.slice(1).join("-");
           const romanClass = ROMAN_MAP[className] || className;
           return `${romanClass}-${subjectName}`;
         }
@@ -59,19 +58,16 @@ const applyRomanNumerals = (assignments) => {
   }
   return newAssignments;
 };
-// --- END NEW LOGIC ---
 
 // ----------------------------
-// helper: safely convert to ObjectId if string looks like one
+// helper: safely convert to ObjectId
 // ----------------------------
 const maybeObjectId = (val) => {
   if (!val) return null;
   try {
     if (mongoose.Types.ObjectId.isValid(val))
       return new mongoose.Types.ObjectId(val);
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
   return null;
 };
 
@@ -80,29 +76,17 @@ const maybeObjectId = (val) => {
 // ----------------------------
 const getReportData = async (req, res) => {
   try {
-    const {
-      year,
-      typeId,
-      classId,
-      status,
-      reportType,
-      branchId, // note: frontend sends branchId
-      subjectId,
-    } = req.query;
+    const { year, typeId, classId, status, reportType, branchId, subjectId } =
+      req.query;
 
     const filter = {};
-
     if (year) filter.year = parseInt(year, 10);
-
-    // Accept ObjectId filters if provided
     if (typeId && mongoose.Types.ObjectId.isValid(typeId)) {
       filter.responsibilityType = new mongoose.Types.ObjectId(typeId);
     }
-
     if (classId && mongoose.Types.ObjectId.isValid(classId)) {
       filter.targetClass = new mongoose.Types.ObjectId(classId);
     }
-
     if (subjectId && mongoose.Types.ObjectId.isValid(subjectId)) {
       filter.targetSubject = new mongoose.Types.ObjectId(subjectId);
     }
@@ -117,7 +101,6 @@ const getReportData = async (req, res) => {
     if (requiresAggregation) {
       const pipeline = [{ $match: filter }];
 
-      // join teacher details
       pipeline.push({
         $lookup: {
           from: "teachers",
@@ -130,7 +113,6 @@ const getReportData = async (req, res) => {
         $unwind: { path: "$teacherDetails", preserveNullAndEmptyArrays: true },
       });
 
-      // If branchId filter present, filter by either assignment.teacherCampus or teacherDetails.campus
       if (branchId && mongoose.Types.ObjectId.isValid(branchId)) {
         const branchObjectId = new mongoose.Types.ObjectId(branchId);
         pipeline.push({
@@ -143,7 +125,6 @@ const getReportData = async (req, res) => {
         });
       }
 
-      // Common lookups for branch/class/type/subject
       pipeline.push(
         {
           $addFields: {
@@ -199,7 +180,6 @@ const getReportData = async (req, res) => {
         }
       );
 
-      // Different projections depending on reportType
       if (reportType === "CAMPUS_SUMMARY") {
         pipeline.push(
           {
@@ -209,19 +189,19 @@ const getReportData = async (req, res) => {
                 type: "$responsibilityType",
               },
               totalAssignments: { $sum: 1 },
+              typeName: { $first: "$typeDetails.name" },
             },
           },
           {
             $project: {
               _id: 0,
               Branch: "$_id.branch",
-              ResponsibilityType: "$typeDetails.name",
+              ResponsibilityType: "$typeName",
               TotalAssignments: "$totalAssignments",
             },
           },
           { $sort: { Branch: 1, ResponsibilityType: 1 } }
         );
-
         const data = await ResponsibilityAssignment.aggregate(
           pipeline
         ).allowDiskUse(true);
@@ -237,26 +217,25 @@ const getReportData = async (req, res) => {
                 type: "$responsibilityType",
               },
               totalAssignments: { $sum: 1 },
+              typeName: { $first: "$typeDetails.name" },
             },
           },
           {
             $project: {
               _id: 0,
               Class: "$_id.class",
-              ResponsibilityType: "$typeDetails.name",
+              ResponsibilityType: "$typeName",
               TotalAssignments: "$totalAssignments",
             },
           },
           { $sort: { Class: 1, ResponsibilityType: 1 } }
         );
-
         const data = await ResponsibilityAssignment.aggregate(
           pipeline
         ).allowDiskUse(true);
         return res.json(data);
       }
 
-      // Default: detailed assignment aggregation that flattens important fields
       pipeline.push({
         $project: {
           ID: { $literal: 0 },
@@ -269,8 +248,6 @@ const getReportData = async (req, res) => {
           STATUS: "$status",
           _ID: "$_id",
           TEACHERID: "$teacherDetails.teacherId",
-          "CREATED AT": "$createdAt",
-          "UPDATED AT": "$updatedAt",
         },
       });
       pipeline.push({ $sort: { CLASS: 1, TEACHER: 1 } });
@@ -281,7 +258,6 @@ const getReportData = async (req, res) => {
       const formatted = data.map((item, idx) => ({ ...item, ID: idx + 1 }));
       return res.json(formatted);
     } else {
-      // Simple find path (no aggregation)
       const assignments = await ResponsibilityAssignment.find(filter)
         .populate("teacher", "name teacherId campus")
         .populate("teacherCampus", "name")
@@ -302,36 +278,34 @@ const getReportData = async (req, res) => {
         _ID: a._id,
         TEACHERID: a.teacher?.teacherId || "N/A",
       }));
-
       return res.json(formatted);
     }
   } catch (error) {
     console.error("CRITICAL REPORT FETCH ERROR:", error);
-    return res.status(500).json({
-      message:
-        "An internal server error occurred during report data retrieval. Please check the server logs for the full stack trace.",
-    });
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
 // ----------------------------
-// helper: fetchYearlyReportData updated for Class-Subject order and Roman conversion
+// helper: fetchYearlyReportData updated for Dynamic Year Filter
 // ----------------------------
 const fetchYearlyReportData = async (
   currentYear,
   previousYear,
-  branchIdRaw
+  branchIdRaw,
+  includePrevious = "true" // 🚀 NEW PARAMETER
 ) => {
   try {
     const branchObjectId = maybeObjectId(branchIdRaw);
-    const initialMatchFilter = {
-      $or: [{ year: currentYear }, { year: previousYear }],
-      status: { $ne: "Cancelled" },
-    };
+
+    // Construct year filter based on checkbox
+    const yearMatch =
+      includePrevious === "true"
+        ? { $or: [{ year: currentYear }, { year: previousYear }] }
+        : { year: currentYear };
 
     const pipeline = [
-      { $match: initialMatchFilter },
-      // Lookup teacher details so we can filter on teacher.campus
+      { $match: { ...yearMatch, status: { $ne: "Cancelled" } } },
       {
         $lookup: {
           from: "teachers",
@@ -343,7 +317,6 @@ const fetchYearlyReportData = async (
       {
         $unwind: { path: "$teacherDetails", preserveNullAndEmptyArrays: true },
       },
-      // If branchId filter present - apply it now using teacherDetails.campus or teacherCampus
       ...(branchObjectId
         ? [
             {
@@ -356,7 +329,6 @@ const fetchYearlyReportData = async (
             },
           ]
         : []),
-      // Lookup type details (we'll use typeDetails.name)
       {
         $lookup: {
           from: "responsibilitytypes",
@@ -366,11 +338,7 @@ const fetchYearlyReportData = async (
         },
       },
       { $unwind: { path: "$typeDetails", preserveNullAndEmptyArrays: true } },
-
-      // Filter out records without a type name (defensive)
       { $match: { "typeDetails.name": { $ne: null } } },
-
-      // other lookups
       {
         $lookup: {
           from: "subjects",
@@ -391,26 +359,22 @@ const fetchYearlyReportData = async (
         },
       },
       { $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true } },
-
-      // 🚀 FIX 1 (ORDER): Concatenation order: Class-Subject
       {
         $addFields: {
           assignmentDetail: {
             $concat: [
-              { $ifNull: ["$classDetails.name", "Class-N/A"] }, // Class first
+              { $ifNull: ["$classDetails.name", "Class-N/A"] },
               "-",
-              { $ifNull: ["$subjectDetails.name", "Sub-N/A"] }, // Subject second
+              { $ifNull: ["$subjectDetails.name", "Sub-N/A"] },
             ],
           },
-          typeName: "$typeDetails.name", // e.g., "Q-HY"
+          typeName: "$typeDetails.name",
           teacherName: "$teacherDetails.name",
           teacherCampus: {
             $ifNull: ["$teacherCampus", "$teacherDetails.campus"],
           },
         },
       },
-
-      // Group by teacher/year/typeName to combine multiple assignmentDetail into an array
       {
         $group: {
           _id: {
@@ -423,8 +387,6 @@ const fetchYearlyReportData = async (
           detailArray: { $push: "$assignmentDetail" },
         },
       },
-
-      // Group by teacher+year to build array of { k: typeName, v: detailArray }
       {
         $group: {
           _id: {
@@ -434,15 +396,10 @@ const fetchYearlyReportData = async (
             year: "$_id.year",
           },
           assignmentsByType: {
-            $push: {
-              k: "$_id.typeName",
-              v: "$detailArray",
-            },
+            $push: { k: "$_id.typeName", v: "$detailArray" },
           },
         },
       },
-
-      // Group by teacher to get an array of yearly assignments (each has year + assignments object)
       {
         $group: {
           _id: "$_id.teacherId",
@@ -456,16 +413,13 @@ const fetchYearlyReportData = async (
           },
         },
       },
-      {
-        $sort: { teacherName: 1 },
-      },
+      { $sort: { teacherName: 1 } },
     ];
 
     let results = await ResponsibilityAssignment.aggregate(
       pipeline
     ).allowDiskUse(true);
 
-    // Lookup branch names for campus ids found
     const branchIds = [
       ...new Set(results.map((r) => r.campus).filter((id) => id)),
     ];
@@ -476,7 +430,6 @@ const fetchYearlyReportData = async (
         new mongoose.Schema({ name: String }),
         "branches"
       );
-
     const campuses = branchIds.length
       ? await BranchModel.find({ _id: { $in: branchIds } })
           .select("name")
@@ -484,15 +437,9 @@ const fetchYearlyReportData = async (
       : [];
     const campusMap = new Map(campuses.map((c) => [c._id.toString(), c.name]));
 
-    // Attach campusName
     results = results.map((r) => ({
       ...r,
       campusName: campusMap.get(String(r.campus)) || "N/A",
-    }));
-
-    // 🚀 FIX 2 (ROMAN): Post-aggregation Roman numeral conversion and application
-    results = results.map((r) => ({
-      ...r,
       yearlyAssignments: r.yearlyAssignments.map((ya) => ({
         ...ya,
         assignments: applyRomanNumerals(ya.assignments),
@@ -507,289 +454,193 @@ const fetchYearlyReportData = async (
 };
 
 // ----------------------------
-// 2️⃣ YEARLY REPORT PDF (Modern jsPDF + autoTable Implementation)
+// 2️⃣ YEARLY REPORT PDF (Updated with Dynamic Rows)
 // ----------------------------
 const exportCampusWiseYearlyPDF = async (req, res) => {
-  const { year, branchId } = req.query;
+  const { year, branchId, includePrevious, selectedTypes } = req.query;
   if (!year) return res.status(400).json({ message: "Year is required." });
 
   const currentYear = parseInt(year, 10);
   const previousYear = currentYear - 1;
+  const isComparing = includePrevious === "true";
+
+  // 🚀 DYNAMIC COLUMNS: Use selected types from frontend or fallback to global RESPONSIBILITY_TYPES
+  const ACTIVE_TYPES = selectedTypes
+    ? selectedTypes.split(",")
+    : RESPONSIBILITY_TYPES;
 
   try {
+    // 1. Fetch the data using aggregation
     const aggregatedData = await fetchYearlyReportData(
       currentYear,
       previousYear,
-      branchId
+      branchId,
+      includePrevious
     );
 
-    if (!ArrayOfData(aggregatedData)) {
-      return res
-        .status(404)
-        .json({ message: "No dynamic data found to export." });
+    if (!ArrayOfData(aggregatedData))
+      return res.status(404).json({ message: "No data found." });
+
+    // 2. Logic for Dynamic Subheadings (Campus & Year)
+    let displayCampus = "All Campuses";
+    if (branchId && mongoose.Types.ObjectId.isValid(branchId)) {
+      const BranchModel = mongoose.models.Branch || mongoose.model("Branch");
+      const branch = await BranchModel.findById(branchId).select("name");
+      if (branch) displayCampus = branch.name;
     }
 
-    // Build flatReport rows (two rows per teacher: current year + previous year)
+    const displayYear = isComparing
+      ? `${previousYear} - ${currentYear}`
+      : `${currentYear}`;
+
+    // 3. Prepare the rows for the table
     const flatReport = [];
     let serial = 1;
 
     for (const teacherResult of aggregatedData) {
       const assignmentData = {};
-      if (Array.isArray(teacherResult.yearlyAssignments)) {
-        teacherResult.yearlyAssignments.forEach((ya) => {
-          assignmentData[ya.year] = ya.assignments || {};
-        });
-      }
+      teacherResult.yearlyAssignments.forEach((ya) => {
+        assignmentData[ya.year] = ya.assignments || {};
+      });
 
       const currentYearRow = {
         SL: serial,
         Campus: teacherResult.campusName || "N/A",
-        // 🚀 FIX 3 (TEACHER NAME): Ensure teacher name is uppercase in PDF data
         Teacher: (teacherResult.teacherName || "N/A").toUpperCase(),
         Year: currentYear,
       };
 
-      const previousYearRow = {
-        SL: "",
-        Campus: "",
-        Teacher: "",
-        Year: previousYear,
-      };
-
-      for (const type of RESPONSIBILITY_TYPES) {
-        const currentAssignments = assignmentData[currentYear]?.[type];
-        const previousAssignments = assignmentData[previousYear]?.[type];
-
-        currentYearRow[type] = Array.isArray(currentAssignments)
-          ? currentAssignments.join(" | ")
+      // Apply assignments for active responsibility types
+      ACTIVE_TYPES.forEach((type) => {
+        currentYearRow[type] = Array.isArray(
+          assignmentData[currentYear]?.[type]
+        )
+          ? assignmentData[currentYear][type].join(" | ")
           : "-";
-        previousYearRow[type] = Array.isArray(previousAssignments)
-          ? previousAssignments.join(" | ")
-          : "-";
+      });
+      flatReport.push(currentYearRow);
+
+      if (isComparing) {
+        const previousYearRow = {
+          SL: "",
+          Campus: "",
+          Teacher: "",
+          Year: previousYear,
+        };
+        ACTIVE_TYPES.forEach((type) => {
+          previousYearRow[type] = Array.isArray(
+            assignmentData[previousYear]?.[type]
+          )
+            ? assignmentData[previousYear][type].join(" | ")
+            : "-";
+        });
+        flatReport.push(previousYearRow);
       }
-
-      flatReport.push(currentYearRow, previousYearRow);
       serial++;
     }
 
-    if (!ArrayOfData(flatReport)) {
-      return res
-        .status(404)
-        .json({ message: "No dynamic data found to export." });
-    }
+    // Dynamic Header Array
+    const head = [["Sl", "Campus", "Teacher's Name", "Year", ...ACTIVE_TYPES]];
 
-    // Prepare head (column names)
-    const head = [
-      ["Sl", "Campus", "Teacher's Name", "Year", ...RESPONSIBILITY_TYPES],
-    ];
-
-    // Prepare body rows (only numbers in Year)
     const body = flatReport.map((r) => [
       r.SL,
       r.Campus,
       r.Teacher,
       r.Year,
-      ...RESPONSIBILITY_TYPES.map((t) => r[t] || "-"),
+      ...ACTIVE_TYPES.map((t) => r[t]),
     ]);
 
-    // Create PDF with autoTable for consistent layout/padding
+    // 4. Generate PDF
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "l" });
+    const pageWidth = doc.internal.pageSize.getWidth();
 
-    // 1. Initial Variable Declarations (Used throughout the function)
-    const pageWidth = doc.internal.pageSize.getWidth(); // Original Declaration
-    const margin = { top: 50, right: 18, bottom: 40, left: 18 }; // Original Declaration
+    // --- Header Section ---
+    doc.setFontSize(16);
+    doc.setFont("helvetica", "bold");
+    doc.text("Yearly Responsibility Report", pageWidth / 2, 30, {
+      align: "center",
+    });
 
-    // Document metadata and title
-    doc.setProperties({ title: `Yearly Assignment Report ${currentYear}` });
-    doc.setFontSize(14);
-    doc.setTextColor(40);
-    doc.text("Yearly Report", pageWidth / 2, 30, { align: "center" });
+    doc.setFontSize(11);
+    doc.setFont("helvetica", "normal");
+    doc.text(`Campus: ${displayCampus}`, pageWidth / 2, 45, {
+      align: "center",
+    });
+    doc.text(`Academic Year: ${displayYear}`, pageWidth / 2, 60, {
+      align: "center",
+    });
 
-    // Define theme/spacing
-    const styles = {
-      // 🚀 FIX: Set vertical alignment to middle and reduced font size
-      fontSize: 7.5,
-      cellPadding: { top: 4, right: 4, bottom: 4, left: 4 },
-      overflow: "linebreak",
-      valign: "middle",
-      halign: "left",
-      textColor: 30,
-      lineColor: [200, 200, 200],
-      lineWidth: 0.3,
-    };
-
-    const headStyles = {
-      fillColor: [245, 205, 121], // soft yellow
-      textColor: 20,
-      fontStyle: "bold",
-      halign: "center",
-      valign: "middle",
-      fontSize: 9,
-    };
-
-    // Column widths: compress SL and Campus
-    // We'll set columnStyles by index
-    const columnStyles = {
-      0: { cellWidth: 28, halign: "center" }, // Sl. (Center aligned)
-      1: { cellWidth: 70 }, // Campus
-      2: { cellWidth: 100 }, // Teacher's name
-      3: { cellWidth: 35, halign: "center" }, // Year (Center aligned)
-    };
-
-    // For responsibility columns, assign uniform smaller widths
-    const respWidth = 72;
-    for (let i = 0; i < RESPONSIBILITY_TYPES.length; i++) {
-      columnStyles[4 + i] = { cellWidth: respWidth };
-    }
-
-    // Add autoTable
+    // 5. Render Table
     doc.autoTable({
-      startY: margin.top,
+      startY: 75,
       head,
       body,
-      styles,
-      headStyles,
-      columnStyles,
       theme: "grid",
-      margin,
-      didDrawPage: (data) => {
-        // NOTE: This hook draws the 'Page X of Y' with 'Y' being the INCORRECT temporary count.
-        const page = doc.internal.getCurrentPageInfo().pageNumber;
-        const pageCount = doc.internal.getNumberOfPages(); // Still incorrect here
-        const footerY = doc.internal.pageSize.getHeight() - 18;
-        const hookMargin = { left: 18, right: 18 }; // Local variable for margins
-
-        // Left Footer: Generated on (static)
-        doc.setFontSize(6);
-        doc.setTextColor(120);
-        const footerText = `Generated on: ${new Date().toLocaleDateString(
-          "en-GB"
-        )}`;
-        doc.text(footerText, hookMargin.left, footerY);
-
-        // Right Footer: Draw incorrect "Page X of Y" (Will be overwritten in second pass)
-        doc.text(
-          `Page ${page} of ${pageCount}`,
-          pageWidth - hookMargin.right,
-          footerY,
-          { align: "right" }
-        );
+      // 🚀 FONT ADJUSTMENT: Shrink font if many columns are selected to prevent overlap
+      styles: {
+        fontSize: ACTIVE_TYPES.length > 8 ? 6 : 7.5,
+        valign: "middle",
+        overflow: "linebreak",
       },
-      // 🚀 FIX 4: Implement Merging Logic
+      headStyles: {
+        fillColor: [245, 205, 121],
+        textColor: 20,
+        fontStyle: "bold",
+        halign: "center",
+      },
+      columnStyles: {
+        0: { cellWidth: 28, halign: "center" },
+        1: { cellWidth: 70 },
+        2: { cellWidth: 100 },
+        3: { cellWidth: 35, halign: "center" },
+      },
       didParseCell: function (data) {
-        if (data.section === "body") {
-          const blockIndex = Math.floor(data.row.index / 2);
-
-          // 1. Alternating row background (zebra) logic
-          if (blockIndex % 2 === 1) {
-            data.cell.styles.fillColor = [250, 250, 250];
-          }
-
-          // 2. Merging logic for the first three columns (Sl, Campus, Teacher)
-          if (data.row.index % 2 === 0) {
-            // First row of the teacher block (Current Year)
-            if (data.column.index <= 2) {
-              // Target Sl (0), Campus (1), Teacher (2)
-              data.cell.rowSpan = 2; // Merge with the row below
-            }
+        if (data.section === "body" && isComparing) {
+          if (data.row.index % 2 === 0 && data.column.index <= 2) {
+            data.cell.rowSpan = 2;
           }
         }
       },
+      didDrawPage: (data) => {
+        const page = doc.internal.getCurrentPageInfo().pageNumber;
+        doc.setFontSize(7);
+        doc.setTextColor(100);
+        doc.text(
+          `Page ${page}`,
+          pageWidth - 40,
+          doc.internal.pageSize.getHeight() - 18,
+          { align: "right" }
+        );
+      },
     });
 
-    // 🚀 FIX 5: Second pass to correctly draw the total page count (Y)
-    const finalPageCount = doc.internal.getNumberOfPages();
-    const footerY = doc.internal.pageSize.getHeight() - 18;
-    const coverWidth = 15;
-    const marginRight = 18; // Use the margin value directly
-
-    for (let i = 1; i <= finalPageCount; i++) {
-      doc.setPage(i);
-
-      // Draw white rectangle to cover old incorrect number (e.g., '1' in "Page X of 1")
-      doc.setFillColor(255, 255, 255);
-      // Cover the area where the old incorrect total page count was drawn.
-      doc.rect(
-        pageWidth - marginRight - coverWidth,
-        footerY - 3,
-        coverWidth,
-        7,
-        "F"
-      );
-
-      // Draw the correct final page count
-      doc.setFontSize(6);
-      doc.setTextColor(120);
-      doc.text(
-        `Page ${i} of ${finalPageCount}`,
-        pageWidth - marginRight,
-        footerY,
-        { align: "right" }
-      );
-    }
-
-    // Send PDF
-    const pdfBuffer = doc.output("arraybuffer");
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `inline; filename=Yearly_Assignment_Report_${currentYear}.pdf`
+      `inline; filename=Yearly_Report_${displayCampus}_${currentYear}.pdf`
     );
-    res.setHeader("Content-Length", pdfBuffer.byteLength);
-    return res.send(Buffer.from(pdfBuffer));
+    return res.send(Buffer.from(doc.output("arraybuffer")));
   } catch (error) {
-    console.error("Yearly PDF Export Error:", error);
-    return res
-      .status(500)
-      .json({ message: error.message || "Yearly export failed." });
+    console.error("Yearly PDF Error:", error);
+    return res.status(500).json({ message: "Export failed." });
   }
 };
 
 // ----------------------------
-// 3️⃣ EXPORT CUSTOM PDF REPORT (jsPDF Implementation w/ sorting, modernized)
+// 3️⃣ EXPORT CUSTOM PDF REPORT (Restored Sorting & Logic)
 // ----------------------------
 const exportCustomReportToPDF = async (req, res) => {
-  const { year, typeId } = req.query;
+  const { year, typeId, reportType } = req.query;
+  if (reportType === "YEARLY_SUMMARY")
+    return exportCampusWiseYearlyPDF(req, res);
 
   try {
-    // Resolve responsibility type display name
     let responsibilityName = "N/A";
     if (typeId && mongoose.Types.ObjectId.isValid(typeId)) {
-      const responsibilityType = await ResponsibilityType.findById(
-        typeId
-      ).select("name");
-      responsibilityName = responsibilityType
-        ? responsibilityType.name
-        : typeId;
-    } else if (typeId) {
-      responsibilityName = typeId;
+      const respType = await ResponsibilityType.findById(typeId).select("name");
+      responsibilityName = respType ? respType.name : "N/A";
     }
 
-    let reportTitle = "Examiners' List";
-    const questionSetterPrefixes = ["Q-HY", "Q-Pre-Test", "Q-Annual", "Q-Test"];
-    if (
-      questionSetterPrefixes.some((prefix) =>
-        responsibilityName.toUpperCase().startsWith(prefix.toUpperCase())
-      )
-    ) {
-      reportTitle = "Question Setters' List";
-    }
-
-    const now = new Date();
-    const datePart = now.toLocaleDateString("en-GB", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-    });
-    const timePart = now.toLocaleTimeString("en-GB", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    });
-    const footerText = `The report generated by FRII Exam Management Software | ${datePart} | ${timePart}`;
-
-    // Reuse getReportData path (simulate request)
     const pseudoReq = {
       query: {
         ...req.query,
@@ -797,22 +648,19 @@ const exportCustomReportToPDF = async (req, res) => {
         status: "Assigned",
       },
     };
-
     let rawData = [];
     const pseudoRes = {
       json: (data) => {
         rawData = data;
-        return data;
       },
-      status: (code) => pseudoRes,
+      status: () => pseudoRes,
       send: () => {},
     };
     await getReportData(pseudoReq, pseudoRes);
 
     if (!ArrayOfData(rawData))
-      return res.status(404).json({ message: "No data found to export." });
+      return res.status(404).json({ message: "No data found." });
 
-    // Sorting arrays (class & subject)
     const CLASS_ORDER = [
       "ONE",
       "TWO",
@@ -834,154 +682,243 @@ const exportCustomReportToPDF = async (req, res) => {
       "ENGLISH-II",
       "MATHEMATICS",
       "R.EDN",
-      "BGS",
       "PHYSICS",
       "CHEMISTRY",
-      "BIOLOGY",
       "H.MATH",
+      "BIOLOGY",
+      "BGS",
       "ACCOUNTING",
-      "B.ENT",
       "FINANCE & BANKING",
+      "B.ENT",
       "SCIENCE",
       "ICT",
-      "H.SCIENCE",
       "AGRICULTURE",
+      "H.SCIENCE",
     ];
 
     rawData.sort((a, b) => {
-      const aClass = (a.CLASS || "").toString().trim().toUpperCase();
-      const bClass = (b.CLASS || "").toString().trim().toUpperCase();
-      const aClassIndex = CLASS_ORDER.indexOf(aClass);
-      const bClassIndex = CLASS_ORDER.indexOf(bClass);
-      if (aClassIndex !== bClassIndex)
+      const aClassIdx = CLASS_ORDER.indexOf(a.CLASS?.toUpperCase());
+      const bClassIdx = CLASS_ORDER.indexOf(b.CLASS?.toUpperCase());
+      if (aClassIdx !== bClassIdx)
         return (
-          (aClassIndex === -1 ? 999 : aClassIndex) -
-          (bClassIndex === -1 ? 999 : bClassIndex)
+          (aClassIdx === -1 ? 999 : aClassIdx) -
+          (bClassIdx === -1 ? 999 : bClassIdx)
         );
 
-      const aSub = (a.SUBJECT || "").toString().trim().toUpperCase();
-      const bSub = (b.SUBJECT || "").toString().trim().toUpperCase();
-      const aSubIndex = SUBJECT_ORDER.indexOf(aSub);
-      const bSubIndex = SUBJECT_ORDER.indexOf(bSub);
-      if (aSubIndex !== bSubIndex)
+      const aSubIdx = SUBJECT_ORDER.indexOf(a.SUBJECT?.toUpperCase());
+      const bSubIdx = SUBJECT_ORDER.indexOf(b.SUBJECT?.toUpperCase());
+      if (aSubIdx !== bSubIdx)
         return (
-          (aSubIndex === -1 ? 999 : aSubIndex) -
-          (bSubIndex === -1 ? 999 : bSubIndex)
+          (aSubIdx === -1 ? 999 : aSubIdx) - (bSubIdx === -1 ? 999 : bSubIdx)
         );
 
-      const aTeacher = (a.TEACHER || "").toString().trim().toUpperCase();
-      const bTeacher = (b.TEACHER || "").toString().trim().toUpperCase();
-      return aTeacher.localeCompare(bTeacher);
+      return a.TEACHER.localeCompare(b.TEACHER);
     });
 
-    // Re-index the S.L. after sorting
-    rawData.forEach((item, index) => {
-      item.ID = index + 1;
-    });
-
-    // Build columns and rows for autoTable
-    const head = [["S.L.", "CLASS", "SUBJECT", "TEACHER", "CAMPUS", "NOTE"]];
-    const body = rawData.map((item) => [
-      item.ID || "",
-      item.CLASS || "N/A",
-      item.SUBJECT || "N/A",
-      (item.TEACHER || "N/A").toUpperCase(), // Teacher name fix applied here
-      item.CAMPUS || "N/A",
-      "",
-    ]);
-
-    // PDF creation
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "p" });
     const pageWidth = doc.internal.pageSize.getWidth();
-
-    // Title
     doc.setFontSize(14);
-    doc.setTextColor(30);
-    doc.text(reportTitle, pageWidth / 2, 36, { align: "center" });
-    doc.setFontSize(9);
-    doc.setTextColor(80);
+    doc.text("Detailed Report", pageWidth / 2, 36, {
+      align: "center",
+    });
+    doc.setFontSize(10);
+    doc.text(`Year: ${year} | Type: ${responsibilityName}`, pageWidth / 2, 52, {
+      align: "center",
+    });
+
+    doc.autoTable({
+      startY: 70,
+      head: [["S.L.", "CLASS", "SUBJECT", "TEACHER", "CAMPUS"]],
+      body: rawData.map((item, index) => [
+        index + 1,
+        item.CLASS,
+        item.SUBJECT,
+        item.TEACHER.toUpperCase(),
+        item.CAMPUS,
+      ]),
+      theme: "grid",
+      headStyles: { fillColor: [30, 58, 138], textColor: 255 },
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    return res.send(Buffer.from(doc.output("arraybuffer")));
+  } catch (error) {
+    console.error("Custom Export Error:", error);
+    return res.status(500).json({ message: "Export failed." });
+  }
+};
+
+const exportCampusRoutinePDF = async (req, res) => {
+  const { branchId, year } = req.query;
+  if (!branchId || !year)
+    return res.status(400).json({ message: "Branch and Year are required." });
+
+  try {
+    const branchObjectId = new mongoose.Types.ObjectId(branchId);
+    const selectedYear = parseInt(year, 10);
+
+    const BranchModel = mongoose.models.Branch || mongoose.model("Branch");
+    const branch = await BranchModel.findById(branchId);
+    const campusName = branch ? branch.name : "N/A";
+
+    const teachers = await Teacher.find({ campus: branchObjectId }).sort({
+      name: 1,
+    });
+
+    if (!teachers.length)
+      return res.status(404).json({ message: "No teachers found." });
+
+    const doc = new jsPDF({ orientation: "p", unit: "pt", format: "a4" });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+
+    const tableBody = [];
+    const teacherRowSpans = []; // Row merging ট্র্যাক করার জন্য
+    let serial = 1;
+
+    for (const teacher of teachers) {
+      const teacherRoutineDoc = await Routine.findOne({ teacher: teacher._id })
+        .populate({ path: "years.assignments.className", model: "Class" })
+        .populate({ path: "years.assignments.subject", model: "Subject" });
+
+      if (teacherRoutineDoc) {
+        const yearData = teacherRoutineDoc.years.find(
+          (y) => y.year === selectedYear
+        );
+
+        if (yearData && yearData.assignments.length > 0) {
+          const uniqueAssignments = [];
+          const seen = new Set();
+
+          yearData.assignments.forEach((assign) => {
+            const classText = assign.className?.name || "N/A";
+            const subjectText = assign.subject?.name || "N/A";
+            const combinedKey = `${classText}-${subjectText}`;
+
+            if (!seen.has(combinedKey)) {
+              seen.add(combinedKey);
+              uniqueAssignments.push({ classText, subjectText });
+            }
+          });
+
+          if (uniqueAssignments.length > 0) {
+            teacherRowSpans.push({
+              startIndex: tableBody.length,
+              span: uniqueAssignments.length,
+            });
+
+            uniqueAssignments.forEach((assign) => {
+              tableBody.push([
+                serial,
+                campusName,
+                teacher.name.toUpperCase(),
+                assign.classText,
+                assign.subjectText,
+              ]);
+            });
+            serial++;
+          }
+        }
+      }
+    }
+
+    // PDF হেডার
+    doc.setFontSize(18);
+    doc.setFont("helvetica", "bold");
+    doc.text("Teacher's Academic Routine", pageWidth / 2, 45, {
+      align: "center",
+    });
+
+    doc.setFontSize(11);
+    doc.setFont("helvetica", "normal");
     doc.text(
-      `Year: ${year || "All"} | Responsibility Type: ${responsibilityName}`,
+      `Campus: ${campusName} | Year: ${selectedYear}`,
       pageWidth / 2,
-      52,
+      62,
       { align: "center" }
     );
 
-    // Styles
-    const margin = { top: 70, left: 40, right: 40, bottom: 30 };
-    const styles = {
-      fontSize: 9,
-      cellPadding: { top: 6, right: 6, bottom: 6, left: 6 },
-      overflow: "linebreak",
-      valign: "middle",
-      halign: "left",
-      lineColor: [210, 210, 210],
-      lineWidth: 0.3,
-    };
-
-    const headStyles = {
-      fillColor: [30, 58, 138],
-      textColor: 255,
-      fontStyle: "bold",
-      halign: "center",
-    };
-
-    const columnStyles = {
-      0: { cellWidth: 30 },
-      1: { cellWidth: 60 },
-      2: { cellWidth: 80 },
-      3: { cellWidth: 180 },
-      4: { cellWidth: 100 },
-      5: { cellWidth: 80 },
-    };
+    // ফুটার ডেটা তৈরি
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("en-GB"); // DD/MM/YYYY
+    const timeStr = now.toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    const footerTextLeft = `Printed on: ${dateStr} - ${timeStr}`;
 
     doc.autoTable({
-      startY: margin.top,
-      head,
-      body,
-      styles,
-      headStyles,
-      columnStyles,
-      margin,
+      startY: 80,
+      head: [["SL", "Campus", "Name", "Class", "Subject"]],
+      body: tableBody,
       theme: "grid",
-      didDrawPage: function (data) {
-        // footer
-        const pageCount = doc.internal.getNumberOfPages();
-        const page = doc.internal.getCurrentPageInfo().pageNumber;
-        doc.setFontSize(8);
-        doc.setTextColor(120);
-        doc.text(
-          footerText,
-          margin.left,
-          doc.internal.pageSize.getHeight() - 12
-        );
-        doc.text(
-          `Page ${page} of ${pageCount}`,
-          doc.internal.pageSize.getWidth() - margin.right,
-          doc.internal.pageSize.getHeight() - 12,
-          { align: "right" }
-        );
+      headStyles: {
+        fillColor: [255, 255, 255],
+        textColor: [0, 0, 0],
+        lineWidth: 1,
+        fontStyle: "bold",
+        halign: "center",
       },
+      styles: {
+        fontSize: 10,
+        textColor: [0, 0, 0],
+        lineWidth: 0.5,
+        valign: "middle", // ভার্টিক্যালি সেন্টার
+      },
+      columnStyles: {
+        0: { halign: "center", cellWidth: 35 },
+        1: { halign: "center", cellWidth: 80 },
+        2: { halign: "left", fontStyle: "bold", cellWidth: 140 }, // 🚀 Name Left Aligned
+        3: { halign: "center", cellWidth: 80 },
+        4: { halign: "left" },
+      },
+      didParseCell: function (data) {
+        if (data.section === "body" && data.column.index <= 2) {
+          const spanInfo = teacherRowSpans.find(
+            (s) => s.startIndex === data.row.index
+          );
+          if (spanInfo) {
+            data.cell.rowSpan = spanInfo.span;
+          }
+        }
+      },
+      didDrawPage: function (data) {
+        // 🚀 Footer Implementation
+        const pageCount = doc.internal.getNumberOfPages();
+        doc.setFontSize(8);
+        doc.setTextColor(100);
+
+        // বাম পাশে প্রিন্ট ডেট ও টাইম
+        doc.text(footerTextLeft, 40, pageHeight - 20);
+
+        // ডান পাশে পেজ নাম্বার
+        const pageNumberText = `Page ${data.pageNumber} of ${pageCount}`;
+        doc.text(pageNumberText, pageWidth - 40, pageHeight - 20, {
+          align: "right",
+        });
+      },
+      margin: { bottom: 40 }, // ফুটারের জন্য জায়গা রাখা
     });
 
-    const pdfBuffer = doc.output("arraybuffer");
+    // সঠিক মোট পেজ সংখ্যা দেখানোর জন্য সেকেন্ড পাস (Optional but recommended)
+    const totalPages = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= totalPages; i++) {
+      doc.setPage(i);
+      doc.setFontSize(8);
+      doc.text(`Page ${i} of ${totalPages}`, pageWidth - 40, pageHeight - 20, {
+        align: "right",
+      });
+    }
+
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `inline; filename=Custom_Assignment_Report_${year || "All"}.pdf`
+      `inline; filename=Routine_${campusName}.pdf`
     );
-    res.setHeader("Content-Length", pdfBuffer.byteLength);
-    res.setHeader("Cache-Control", "no-cache");
-    return res.send(Buffer.from(pdfBuffer));
+    return res.send(Buffer.from(doc.output("arraybuffer")));
   } catch (error) {
-    console.error("Custom PDF Export Failed (jsPDF - Custom):", error);
-    if (!res.headersSent) {
-      return res.status(500).json({
-        message: `PDF Generation Failed: ${
-          error.message || "An unknown error occurred during PDF streaming."
-        }`,
-      });
-    }
+    console.error("Routine Export Error:", error);
+    res.status(500).json({ message: "Export Failed" });
   }
 };
 
@@ -989,4 +926,5 @@ module.exports = {
   getReportData,
   exportCustomReportToPDF,
   exportCampusWiseYearlyPDF,
+  exportCampusRoutinePDF,
 };
