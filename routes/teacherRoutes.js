@@ -4,7 +4,9 @@ const {
   getAllTeachers,
   getTeacherProfile,
   updateTeacher,
-  addAnnualReport, // 🚀 নতুন কন্ট্রোলার ফাংশন
+  deleteTeacher,
+  addAnnualReport,
+  deleteAnnualReport, // 🚀 নতুন কন্ট্রোলার ফাংশন ইমপোর্ট করুন
   bulkUploadTeachers,
 } = require("../controllers/teacherController");
 
@@ -13,26 +15,31 @@ const upload = require("../middleware/uploadMiddleware");
 
 const router = express.Router();
 
-// Base Routes: /api/teachers
+// --- 🏢 Base Routes: /api/teachers ---
 router
   .route("/")
-  // GET /api/teachers - সকল শিক্ষক দেখা ও সার্চ করা (Admin/Incharge/Teacher সবাই পারবে)
+  // সকল শিক্ষক দেখা ও সার্চ করা
   .get(protect, getAllTeachers)
-  // POST /api/teachers - নতুন শিক্ষক যুক্ত করা (শুধুমাত্র Admin এবং Incharge পারবে)
+  // নতুন শিক্ষক যুক্ত করা
   .post(protect, staffOnly, addTeacher);
 
-// 🚀 NEW ROUTE: বার্ষিক রিপোর্ট যুক্ত করা (Admin এবং Incharge পারবে)
-// POST /api/teachers/:id/report
+// --- 📤 Bulk Upload Route ---
+router.post("/bulk-upload", protect, admin, upload, bulkUploadTeachers);
+
+// --- 📊 Annual Report Management ---
+// নতুন রিপোর্ট যুক্ত করা
 router.post("/:id/report", protect, staffOnly, addAnnualReport);
 
-// ID Specific Routes: /api/teachers/:id
+router.delete("/:id/reports/:reportId", protect, admin, deleteAnnualReport);
+
+// --- 🛠️ ID Specific Routes: /api/teachers/:id ---
 router
   .route("/:id")
+  // প্রোফাইল দেখা
   .get(protect, staffOnly, getTeacherProfile)
-  .put(protect, admin, updateTeacher); // 🚀 এখন আর undefined হবে না
-
-// Bulk Upload Route: /api/teachers/bulk-upload
-// শুধুমাত্র অ্যাডমিন বাল্ক আপলোড করতে পারবে
-router.post("/bulk-upload", protect, admin, upload, bulkUploadTeachers);
+  // তথ্য আপডেট করা
+  .put(protect, admin, updateTeacher)
+  // শিক্ষক স্থায়ীভাবে মুছে ফেলা
+  .delete(protect, admin, deleteTeacher);
 
 module.exports = router;
