@@ -5,28 +5,41 @@ const {
   getAllLeaveRequests,
   createLeaveRequest,
   grantLeaveRequest,
-  deleteLeaveRequestPermanently, // ✅ NEW: Import the deletion controller
+  deleteLeaveRequestPermanently,
   exportLeavesToExcel,
   checkLeaveConflict,
 } = require("../controllers/leaveController");
+
+// ইনচার্জদের অনুমতি দেওয়ার জন্য adminOrIncharge মিডলওয়্যার প্রয়োজন হতে পারে
+// অথবা আপনি protect মিডলওয়্যার ব্যবহার করে কন্ট্রোলারের ভেতরে রোল চেক করতে পারেন
 const { protect, admin } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// GET /api/leaves - সমস্ত অনুরোধ দেখুন (Admin Only)
-router.route("/").get(protect, admin, getAllLeaveRequests);
+/**
+ * ℹ️ লজিক আপডেট:
+ * ইনচার্জরা এখন এই রাউটটি অ্যাক্সেস করতে পারবেন।
+ * কন্ট্রোলারের ভেতর (getAllLeaveRequests) চেক করা হবে ইউজার ইনচার্জ হলে
+ * শুধুমাত্র তাঁর ক্যাম্পাসের ডেটা পাঠানো হবে।
+ */
+// GET /api/leaves - সমস্ত বা ক্যাম্পাস ভিত্তিক অনুরোধ দেখুন (Admin & Incharge)
+router.route("/").get(protect, getAllLeaveRequests);
 
-// POST /api/leaves - নতুন অনুরোধ তৈরি করুন (Protected - Teacher/Admin)
+// POST /api/leaves - নতুন অনুরোধ তৈরি করুন (Teacher/Admin/Incharge)
 router.route("/").post(protect, createLeaveRequest);
+
+// --- 🛡️ ADMIN RESTRICTED ROUTES ---
 
 // PUT /api/leaves/:id/grant - স্থিতি পরিবর্তন করুন (Admin Only)
 router.route("/:id/grant").put(protect, admin, grantLeaveRequest);
 
-// ✅ NEW ROUTE: DELETE /api/leaves/:id - স্থায়ীভাবে মুছে ফেলা (Admin Only)
+// DELETE /api/leaves/:id - স্থায়ীভাবে মুছে ফেলা (Admin Only)
 router.route("/:id").delete(protect, admin, deleteLeaveRequestPermanently);
-// ✅ NEW ROUTE: GET /api/leaves/export/excel - Export to Excel (Protected)
+
+// GET /api/leaves/export/excel - Export to Excel (Admin Only)
 router.get("/export/excel", protect, admin, exportLeavesToExcel);
 
+// কনফ্লিক্ট চেক (সবাই করতে পারবে)
 router.get("/conflict-check", protect, checkLeaveConflict);
 
 module.exports = router;
