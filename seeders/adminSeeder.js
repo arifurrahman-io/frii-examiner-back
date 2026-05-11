@@ -9,11 +9,20 @@ connectDB(); // ডাটাবেস সংযোগ করুন
 const seedAdminUser = async () => {
   try {
     // ১. অ্যাডমিনের ক্রেডেনশিয়ালস
-    const adminUsername = process.env.ADMIN_USERNAME;
+    const adminUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_EMAIL;
+    const adminEmail = process.env.ADMIN_EMAIL || adminUsername;
     const adminPassword = process.env.ADMIN_PASSWORD;
 
+    if (!adminUsername || !adminEmail || !adminPassword) {
+      throw new Error(
+        "ADMIN_USERNAME or ADMIN_EMAIL and ADMIN_PASSWORD are required."
+      );
+    }
+
     // ডুপ্লিকেট অ্যাডমিন চেক করা
-    const existingAdmin = await User.findOne({ username: adminUsername });
+    const existingAdmin = await User.findOne({
+      $or: [{ username: adminUsername }, { email: adminEmail.toLowerCase() }],
+    });
     if (existingAdmin) {
       console.log("Admin user already exists. Skipping seed.");
       return;
@@ -25,7 +34,9 @@ const seedAdminUser = async () => {
 
     // ৩. নতুন অ্যাডমিন তৈরি করা
     const newAdmin = await User.create({
+      name: process.env.ADMIN_NAME || "Super Admin",
       username: adminUsername,
+      email: adminEmail.toLowerCase(),
       password: hashedPassword,
       role: "admin", // ⬅️ অ্যাডমিন রোল সেট করা
     });

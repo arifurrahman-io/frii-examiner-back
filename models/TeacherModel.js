@@ -16,6 +16,12 @@ const TeacherSchema = new mongoose.Schema(
     phone: {
       type: String,
       required: false,
+      trim: true,
+      set: (value) => {
+        if (value === null || value === undefined) return undefined;
+        const trimmedValue = value.toString().trim();
+        return trimmedValue || undefined;
+      },
     },
     campus: {
       type: mongoose.Schema.Types.ObjectId,

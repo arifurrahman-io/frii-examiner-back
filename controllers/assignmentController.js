@@ -6,7 +6,7 @@ const mongoose = require("mongoose");
 const Class = require("../models/ClassModel");
 const Subject = require("../models/SubjectModel");
 
-// --- ১. Assign Responsibility ---
+// --- ১. Assign Responsibility (Updated with Incharge Restrictions) ---
 const assignResponsibility = async (req, res) => {
   const {
     teacher,
@@ -18,11 +18,13 @@ const assignResponsibility = async (req, res) => {
   } = req.body;
 
   try {
-    // 1. Fetch Teacher Details and Responsibility Type concurrently
-    const [teacherExists, typeExists] = await Promise.all([
-      // Populate the 'campus' field from the Teacher model
+    // 1. Fetch Teacher, Responsibility Type, and target Class concurrently
+    const [teacherExists, typeExists, classExists, subjectExists] =
+      await Promise.all([
       Teacher.findById(teacher).populate("campus"),
       ResponsibilityType.findById(responsibilityType),
+      targetClass ? Class.findById(targetClass) : null,
+      targetSubject ? Subject.findById(targetSubject) : null,
     ]);
 
     if (!teacherExists || !typeExists)
@@ -30,17 +32,48 @@ const assignResponsibility = async (req, res) => {
         .status(404)
         .json({ message: "Teacher or Responsibility Type not found." });
 
-    // ✅ NEW: Extract the campus ID from the fetched teacher object
+    if (typeExists.requiresClassSubject && (!classExists || !subjectExists)) {
+      return res.status(400).json({
+        message: "Class and Subject are required for this responsibility type.",
+      });
+    }
+
+    if (targetClass && !classExists) {
+      return res.status(404).json({ message: "Target class not found." });
+    }
+
+    if (targetSubject && !subjectExists) {
+      return res.status(404).json({ message: "Target subject not found." });
+    }
+
+    // 🛡️ ROLE PROTECTION: Incharge restricted to Class One, Two, Three
+    if (req.user.role === "incharge") {
+      if (String(teacherExists.campus?._id) !== String(req.user.campus)) {
+        return res.status(403).json({
+          message:
+            "Access Denied: You can only assign teachers from your campus.",
+        });
+      }
+
+      const allowedClasses = ["ONE", "TWO", "THREE"];
+      if (classExists && !allowedClasses.includes(classExists.name)) {
+        return res.status(403).json({
+          message:
+            "Access Denied: Incharge can only assign responsibilities to Class One, Two, or Three.",
+        });
+      }
+    }
+
+    // Extract the campus ID from the fetched teacher object
     const teacherCampusId = teacherExists.campus?._id;
 
-    // Safety check: ensure campus was found
     if (!teacherCampusId) {
       return res
         .status(400)
         .json({ message: "Teacher's campus is missing or invalid." });
     }
 
-    // ... (Leave conflict check remains unchanged) ...
+    // 2. Leave conflict check
     const leaveConflict = await Leave.findOne({
       teacher,
       responsibilityType,
@@ -53,7 +86,7 @@ const assignResponsibility = async (req, res) => {
         message: `Assignment blocked: Teacher has a Granted Leave for this responsibility type in ${year}.`,
       });
 
-    // ... (Existing assignment check remains unchanged) ...
+    // 3. Existing assignment check
     const existingAssignment = await ResponsibilityAssignment.findOne({
       teacher,
       responsibilityType,
@@ -67,10 +100,10 @@ const assignResponsibility = async (req, res) => {
         message: "This exact responsibility is already assigned and active.",
       });
 
-    // 2. Create new assignment with the new teacherCampus field
+    // 4. Create new assignment
     const newAssignment = await ResponsibilityAssignment.create({
       teacher,
-      teacherCampus: teacherCampusId, // ✅ SAVE THE CAMPUS ID
+      teacherCampus: teacherCampusId,
       responsibilityType,
       year,
       targetClass,
@@ -87,7 +120,7 @@ const assignResponsibility = async (req, res) => {
   }
 };
 
-// --- ২. Hard Delete ---
+// --- ২. Hard Delete (Admin Only Logic should be in Routes) ---
 const deleteAssignmentPermanently = async (req, res) => {
   try {
     const deletedAssignment = await ResponsibilityAssignment.findByIdAndDelete(
@@ -107,14 +140,15 @@ const deleteAssignmentPermanently = async (req, res) => {
   }
 };
 
-// --- ৩. Get Assignments with Filtering & Campus support ---
+// --- ৩. Get Assignments with Filtering & Aggregation ---
 const getAssignmentsForReport = async (req, res) => {
   const { year, typeId, classId, status, campusId } = req.query;
 
   let matchQuery = {};
   if (year) matchQuery.year = parseInt(year);
-  if (typeId) matchQuery.responsibilityType = typeId;
-  if (classId) matchQuery.targetClass = classId;
+  if (typeId)
+    matchQuery.responsibilityType = new mongoose.Types.ObjectId(typeId);
+  if (classId) matchQuery.targetClass = new mongoose.Types.ObjectId(classId);
   if (status) matchQuery.status = status;
   if (!matchQuery.status) matchQuery.status = { $ne: "Cancelled" };
 
@@ -132,7 +166,7 @@ const getAssignmentsForReport = async (req, res) => {
     });
     pipeline.push({ $unwind: "$teacherDetails" });
 
-    // Apply campus filter if provided
+    // Apply campus filter
     if (campusId && mongoose.Types.ObjectId.isValid(campusId)) {
       pipeline.push({
         $match: {
@@ -141,7 +175,7 @@ const getAssignmentsForReport = async (req, res) => {
       });
     }
 
-    // Lookup branch name from campuses collection
+    // Lookup branch
     pipeline.push({
       $lookup: {
         from: "branches",
@@ -154,41 +188,29 @@ const getAssignmentsForReport = async (req, res) => {
       $unwind: { path: "$branchDetails", preserveNullAndEmptyArrays: true },
     });
 
-    // Lookup responsibility type
-    pipeline.push({
-      $lookup: {
+    // Lookup types, classes, subjects
+    const lookups = [
+      {
         from: "responsibilitytypes",
-        localField: "responsibilityType",
-        foreignField: "_id",
+        field: "responsibilityType",
         as: "typeDetails",
       },
-    });
-    pipeline.push({ $unwind: "$typeDetails" });
+      { from: "classes", field: "targetClass", as: "classDetails" },
+      { from: "subjects", field: "targetSubject", as: "subjectDetails" },
+    ];
 
-    // Lookup class
-    pipeline.push({
-      $lookup: {
-        from: "classes",
-        localField: "targetClass",
-        foreignField: "_id",
-        as: "classDetails",
-      },
-    });
-    pipeline.push({
-      $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true },
-    });
-
-    // Lookup subject
-    pipeline.push({
-      $lookup: {
-        from: "subjects",
-        localField: "targetSubject",
-        foreignField: "_id",
-        as: "subjectDetails",
-      },
-    });
-    pipeline.push({
-      $unwind: { path: "$subjectDetails", preserveNullAndEmptyArrays: true },
+    lookups.forEach((l) => {
+      pipeline.push({
+        $lookup: {
+          from: l.from,
+          localField: l.field,
+          foreignField: "_id",
+          as: l.as,
+        },
+      });
+      pipeline.push({
+        $unwind: { path: `$${l.as}`, preserveNullAndEmptyArrays: true },
+      });
     });
 
     // Final projection
@@ -210,17 +232,15 @@ const getAssignmentsForReport = async (req, res) => {
     pipeline.push({ $sort: { Class: 1, Teacher: 1 } });
 
     const assignments = await ResponsibilityAssignment.aggregate(pipeline);
-
     res.json(assignments);
   } catch (error) {
-    console.error("Report Fetch Error:", error);
     res.status(500).json({
       message: "Error fetching assignments for report: " + error.message,
     });
   }
 };
 
-// --- ৪. Get Assignments by Teacher & Year (Conflict Check) ---
+// --- ৪. Conflict Check ---
 const getAssignmentsByTeacherAndYear = async (req, res) => {
   const { teacherId } = req.params;
   const { year } = req.query;
@@ -240,7 +260,6 @@ const getAssignmentsByTeacherAndYear = async (req, res) => {
 
     res.json(assignments);
   } catch (error) {
-    console.error("Assignment conflict check failed:", error);
     res.status(500).json({
       message: "Failed to fetch existing assignments for conflict check.",
     });

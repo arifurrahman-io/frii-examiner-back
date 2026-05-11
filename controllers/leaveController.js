@@ -4,6 +4,33 @@ const ResponsibilityType = require("../models/ResponsibilityTypeModel");
 const Branch = require("../models/BranchModel");
 const exceljs = require("exceljs");
 
+const buildScopedLeaveQuery = async (req, baseQuery = {}) => {
+  const query = { ...baseQuery };
+
+  if (req.query.year) query.year = parseInt(req.query.year, 10);
+  if (req.query.teacher) query.teacher = req.query.teacher;
+
+  if (req.user.role === "incharge") {
+    const campusTeachers = await Teacher.find({ campus: req.user.campus })
+      .select("_id")
+      .lean();
+    const teacherIds = campusTeachers.map((teacher) => teacher._id);
+
+    if (query.teacher) {
+      const isOwnCampusTeacher = teacherIds.some(
+        (id) => String(id) === String(query.teacher)
+      );
+      if (!isOwnCampusTeacher) {
+        query.teacher = { $in: [] };
+      }
+    } else {
+      query.teacher = { $in: teacherIds };
+    }
+  }
+
+  return query;
+};
+
 // ***************************************
 // 🔹 Helper Function for Base Leave Query
 // ***************************************
@@ -25,13 +52,10 @@ const getBaseLeavesData = async (query) => {
 // 🔹 GET ALL LEAVE REQUESTS
 // ***************************************
 const getAllLeaveRequests = async (req, res) => {
-  const { status = "Granted", teacher } = req.query;
-
-  let query = { status };
-
-  if (teacher) query.teacher = teacher;
+  const { status = "Granted" } = req.query;
 
   try {
+    const query = await buildScopedLeaveQuery(req, { status });
     const leaves = await getBaseLeavesData(query);
     res.json(leaves);
   } catch (error) {
@@ -63,6 +87,26 @@ const createLeaveRequest = async (req, res) => {
   }
 
   try {
+    if (!["admin", "incharge"].includes(req.user.role)) {
+      return res.status(403).json({
+        message: "Access restricted. Only Admin or Incharge can grant leave.",
+      });
+    }
+
+    const targetTeacher = await Teacher.findById(teacher);
+    if (!targetTeacher) {
+      return res.status(404).json({ message: "Teacher not found." });
+    }
+
+    if (
+      req.user.role === "incharge" &&
+      String(targetTeacher.campus) !== String(req.user.campus)
+    ) {
+      return res.status(403).json({
+        message: "Access denied. Teacher belongs to a different campus.",
+      });
+    }
+
     const newLeave = await Leave.create({
       teacher,
       responsibilityType,
@@ -80,6 +124,44 @@ const createLeaveRequest = async (req, res) => {
     res
       .status(500)
       .json({ message: "Failed to create leave request: " + error.message });
+  }
+};
+
+const updateLeaveRequest = async (req, res) => {
+  const { responsibilityType, year, startDate, endDate, reason, status } =
+    req.body;
+
+  try {
+    const leave = await Leave.findById(req.params.id).populate("teacher");
+    if (!leave) {
+      return res.status(404).json({ message: "Leave record not found." });
+    }
+
+    if (
+      req.user.role === "incharge" &&
+      String(leave.teacher?.campus) !== String(req.user.campus)
+    ) {
+      return res.status(403).json({
+        message: "Access denied. Leave belongs to a different campus.",
+      });
+    }
+
+    if (responsibilityType) leave.responsibilityType = responsibilityType;
+    if (year) leave.year = parseInt(year, 10);
+    if (startDate !== undefined)
+      leave.startDate = startDate ? new Date(startDate) : null;
+    if (endDate !== undefined) leave.endDate = endDate ? new Date(endDate) : null;
+    if (reason !== undefined) leave.reason = reason;
+    if (status && ["Pending", "Granted", "Rejected"].includes(status)) {
+      leave.status = status;
+    }
+
+    const updatedLeave = await leave.save();
+    res.json({ message: "Leave record updated.", leave: updatedLeave });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to update leave record: " + error.message,
+    });
   }
 };
 
@@ -228,6 +310,7 @@ const checkLeaveConflict = async (req, res) => {
 module.exports = {
   getAllLeaveRequests,
   createLeaveRequest,
+  updateLeaveRequest,
   grantLeaveRequest,
   deleteLeaveRequestPermanently,
   exportLeavesToExcel,

@@ -3,16 +3,26 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 // Environment variables থেকে সিক্রেট কি লোড করা
-const JWT_SECRET = process.env.JWT_SECRET || "your_fallback_secret_key";
-const REFRESH_SECRET =
-  process.env.REFRESH_SECRET || "refresh_fallback_secret_key";
+const JWT_SECRET = process.env.JWT_SECRET;
+const REFRESH_SECRET = process.env.REFRESH_SECRET || JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET environment variable is required.");
+}
 
 /**
  * JWT Access এবং Refresh Token তৈরি করার হেল্পার ফাংশন
  */
 const generateTokens = (user) => {
   const accessToken = jwt.sign(
-    { id: user._id, role: user.role, username: user.username },
+    {
+      id: user._id,
+      role: user.role,
+      name: user.name || user.username,
+      username: user.username,
+      email: user.email,
+      campus: user.campus,
+    },
     JWT_SECRET,
     { expiresIn: "7d" } // সিকিউরিটির জন্য Access Token কম সময়ের রাখা হয়েছে
   );
@@ -29,9 +39,10 @@ const generateTokens = (user) => {
 // --- POST /api/auth/login ---
 const loginUser = async (req, res) => {
   const { username, password } = req.body;
+  const identifier = username?.trim();
 
   // ১. ইনপুট চেক করা
-  if (!username || !password) {
+  if (!identifier || !password) {
     return res.status(400).json({
       success: false,
       message: "Username/Email and password are required.",
@@ -42,11 +53,15 @@ const loginUser = async (req, res) => {
     // ২. ইউজারকে তার ইউজারনেম অথবা ইমেইল দিয়ে খুঁজে বের করা
     // .select('+password') ব্যবহার করা হয়েছে কারণ মডেলে পাসওয়ার্ড ডিফল্টভাবে হাইড করা থাকতে পারে
     const user = await User.findOne({
-      $or: [{ username: username }, { email: username }],
+      $or: [
+        { username: identifier },
+        { email: identifier.toLowerCase() },
+        { name: identifier },
+      ],
     }).select("+password");
 
     if (!user) {
-      console.log(`Login failed: User not found - ${username}`);
+      console.log(`Login failed: User not found - ${identifier}`);
       return res.status(401).json({
         success: false,
         message: "Invalid credentials (User not found).",
@@ -55,7 +70,7 @@ const loginUser = async (req, res) => {
 
     // ৩. পাসওয়ার্ড যাচাই করা
     if (!user.password) {
-      console.error(`ERROR: Password hash missing for user: ${user.username}`);
+      console.error(`ERROR: Password hash missing for user: ${user.email}`);
       return res.status(500).json({
         success: false,
         message: "Server configuration error: User password missing.",
@@ -65,7 +80,7 @@ const loginUser = async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
-      console.log(`Login failed: Password mismatch for user - ${username}`);
+      console.log(`Login failed: Password mismatch for user - ${identifier}`);
       return res.status(401).json({
         success: false,
         message: "Invalid credentials (Password mismatch).",
@@ -82,9 +97,11 @@ const loginUser = async (req, res) => {
       refreshToken,
       user: {
         _id: user._id,
-        name: user.username,
+        name: user.name || user.username,
+        username: user.username,
         role: user.role,
         email: user.email,
+        campus: user.campus,
       },
     });
   } catch (error) {

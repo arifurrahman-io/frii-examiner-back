@@ -2,7 +2,11 @@ const jwt = require("jsonwebtoken");
 const User = require("../models/UserModel");
 
 // এনভায়রনমেন্ট ভ্যারিয়েবল থেকে সিক্রেট কী সংগ্রহ
-const JWT_SECRET = process.env.JWT_SECRET || "your_fallback_secret_key";
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET environment variable is required.");
+}
 
 /**
  * @desc ইউজার অথেন্টিকেশন যাচাই (JWT Verification)

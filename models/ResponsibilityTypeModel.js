@@ -43,6 +43,12 @@ const ResponsibilityTypeSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+
+    submissionDeadline: {
+      type: Date,
+      required: false,
+      default: null,
+    },
   },
   {
     timestamps: true,

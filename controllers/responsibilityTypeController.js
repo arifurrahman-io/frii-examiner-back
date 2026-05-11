@@ -1,12 +1,24 @@
 // controllers/responsibilityTypeController.js
 const ResponsibilityType = require("../models/ResponsibilityTypeModel");
 
+const normalizeSubmissionDeadline = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
 // ----------------------------
 // 1️⃣ Add Responsibility Type
 // POST /api/responsibility-types
 // ----------------------------
 const addResponsibilityType = async (req, res) => {
-  const { name, description, category, requiresClassSubject } = req.body;
+  const {
+    name,
+    description,
+    category,
+    requiresClassSubject,
+    submissionDeadline,
+  } = req.body;
 
   if (!name || !category) {
     return res.status(400).json({
@@ -21,6 +33,7 @@ const addResponsibilityType = async (req, res) => {
       category,
       requiresClassSubject:
         requiresClassSubject !== undefined ? requiresClassSubject : true,
+      submissionDeadline: normalizeSubmissionDeadline(submissionDeadline),
     });
 
     res.status(201).json(newType);
@@ -56,7 +69,13 @@ const getAllResponsibilityTypes = async (req, res) => {
 // PUT /api/responsibility-types/:id
 // ----------------------------
 const updateResponsibilityType = async (req, res) => {
-  const { name, description, category, requiresClassSubject } = req.body;
+  const {
+    name,
+    description,
+    category,
+    requiresClassSubject,
+    submissionDeadline,
+  } = req.body;
 
   if (!name || !category) {
     return res
@@ -71,6 +90,7 @@ const updateResponsibilityType = async (req, res) => {
       category,
       requiresClassSubject:
         requiresClassSubject !== undefined ? requiresClassSubject : true,
+      submissionDeadline: normalizeSubmissionDeadline(submissionDeadline),
     };
 
     const updatedType = await ResponsibilityType.findByIdAndUpdate(

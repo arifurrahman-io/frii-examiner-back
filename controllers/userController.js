@@ -23,10 +23,11 @@ const getUsers = async (req, res) => {
  */
 const addUser = async (req, res) => {
   try {
-    const { name, email, password, role, campus } = req.body;
+    const { name, email, password, role, campus, username } = req.body;
+    const normalizedEmail = email?.trim().toLowerCase();
 
     // ১. ইমেইল ডুপ্লিকেশন চেক
-    const userExists = await User.findOne({ email });
+    const userExists = await User.findOne({ email: normalizedEmail });
     if (userExists) {
       return res.status(400).json({
         message: "Identity conflict: User with this email already exists.",
@@ -48,7 +49,8 @@ const addUser = async (req, res) => {
     // ৪. ইউজার তৈরি
     const user = await User.create({
       name,
-      email,
+      username: username?.trim() || normalizedEmail,
+      email: normalizedEmail,
       password: hashedPassword,
       role: role || "teacher",
       // অ্যাডমিন বা টিচার হলে ক্যাম্পাস ফিল্ড রিমুভ করা
@@ -77,10 +79,12 @@ const addUser = async (req, res) => {
  */
 const updateUser = async (req, res) => {
   try {
-    const { password, role, campus, ...otherData } = req.body;
+    const { password, role, campus, email, username, ...otherData } = req.body;
 
     // আপডেট করার জন্য প্রাথমিক ডাটা
     let updateFields = { ...otherData, role };
+    if (email) updateFields.email = email.trim().toLowerCase();
+    if (username) updateFields.username = username.trim();
 
     // 🛡️ পাসওয়ার্ড লজিক: যদি পাসওয়ার্ড ইনপুট দেওয়া হয় তবেই সেটি হ্যাশ করে আপডেট হবে
     if (password && password.trim() !== "") {

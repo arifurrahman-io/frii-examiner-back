@@ -3,34 +3,45 @@ const {
   assignResponsibility,
   getAssignmentsForReport,
   getAssignmentsByTeacherAndYear,
-  deleteAssignmentPermanently, // ✅ Hard Delete Controller Function
-  // Note: cancelAssignment is intentionally NOT imported as it's no longer used.
+  deleteAssignmentPermanently,
 } = require("../controllers/assignmentController");
 
 const { protect, admin } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// --- Base Routes ---
+// --- ১. Base Routes ---
 
 router
   .route("/")
-  // POST /api/assignments (দায়িত্ব অ্যাসাইন করা - Admin Only)
-  .post(protect, admin, assignResponsibility)
-  // GET /api/assignments (রিপোর্টের জন্য ফিল্টার করে ডেটা আনা - Login Required)
+  /**
+   * POST /api/assignments
+   * দায়িত্ব অ্যাসাইন করা।
+   * এখানে 'admin' সরিয়ে দেওয়া হয়েছে কারণ 'incharge' এখন ক্লাস ১-৩ এর জন্য এক্সেস পাবে।
+   * কন্ট্রোলারের ভেতরে অলরেডি রোল ভিত্তিক সিকিউরিটি চেক যুক্ত করা হয়েছে।
+   */
+  .post(protect, assignResponsibility)
+
+  /**
+   * GET /api/assignments
+   * রিপোর্টের জন্য ফিল্টার করে ডেটা আনা (Login Required)
+   */
   .get(protect, getAssignmentsForReport);
 
-// --- ID Specific Routes ---
+// --- ২. ID Specific Routes ---
 
-// DELETE /api/assignments/:id (স্থায়ীভাবে ডিলিট করা - Admin Only)
-// এটি মডাল থেকে স্থায়ীভাবে ডেটা মুছে ফেলার জন্য ব্যবহৃত হবে।
-router.route("/:id").delete(protect, admin, deleteAssignmentPermanently); // ✅ Hard Delete Route
+/**
+ * DELETE /api/assignments/:id
+ * স্থায়ীভাবে ডিলিট করা - এটি শুধুমাত্র Admin এর জন্য সংরক্ষিত।
+ * ইনচার্জ ডাটা এন্ট্রি করতে পারলেও ডিলিট করার প্রটোকল তার নেই।
+ */
+router.route("/:id").delete(protect, admin, deleteAssignmentPermanently);
 
-// ❌ PUT /api/assignments/:id/cancel রুটটি সম্পূর্ণভাবে মুছে ফেলা হলো
-// ❌ কারণ cancelAssignment ফাংশনটি এখন আর বিদ্যমান নেই এবং Soft Delete দরকার নেই।
-
-// --- Teacher Specific Query (Conflict Check for Modal) ---
-// GET /api/assignments/teacher/:teacherId?year=2025 (Login Required)
+// --- ৩. Teacher Specific Query (Conflict Check) ---
+/**
+ * GET /api/assignments/teacher/:teacherId
+ * শিক্ষকের বর্তমান বছরের এসাইনমেন্ট চেক করা (Login Required)
+ */
 router
   .route("/teacher/:teacherId")
   .get(protect, getAssignmentsByTeacherAndYear);

@@ -27,7 +27,41 @@ const userRoutes = require("./routes/userRoutes");
 const app = express();
 
 // ৪. মিডেলওয়্যার সেটআপ
-app.use(cors());
+const parseOrigins = (...values) =>
+  values
+    .filter(Boolean)
+    .flatMap((value) => value.split(","))
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+
+const allowedOrigins = [
+  ...new Set(
+    parseOrigins(
+      process.env.CORS_ORIGIN,
+      process.env.CLIENT_URL,
+      process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "",
+      "http://localhost:5173,http://localhost:4173",
+      "https://frii-examiner.vercel.app"
+    )
+  ),
+];
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      const normalizedOrigin = origin?.replace(/\/$/, "");
+
+      if (!normalizedOrigin || allowedOrigins.includes(normalizedOrigin)) {
+        return callback(null, true);
+      }
+
+      const error = new Error(`Not allowed by CORS: ${origin}`);
+      error.statusCode = 403;
+      return callback(error);
+    },
+    credentials: true,
+  })
+);
 app.use(express.json()); // রিকোয়েস্ট বডি পার্স করার জন্য
 if (process.env.NODE_ENV === "development") {
   app.use(morgan("dev")); // ডেভেলপমেন্ট মোডে রিকোয়েস্ট লগ করবে

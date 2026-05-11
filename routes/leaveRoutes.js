@@ -4,6 +4,7 @@ const express = require("express");
 const {
   getAllLeaveRequests,
   createLeaveRequest,
+  updateLeaveRequest,
   grantLeaveRequest,
   deleteLeaveRequestPermanently,
   exportLeavesToExcel,
@@ -34,7 +35,10 @@ router.route("/").post(protect, createLeaveRequest);
 router.route("/:id/grant").put(protect, admin, grantLeaveRequest);
 
 // DELETE /api/leaves/:id - স্থায়ীভাবে মুছে ফেলা (Admin Only)
-router.route("/:id").delete(protect, admin, deleteLeaveRequestPermanently);
+router
+  .route("/:id")
+  .put(protect, updateLeaveRequest)
+  .delete(protect, admin, deleteLeaveRequestPermanently);
 
 // GET /api/leaves/export/excel - Export to Excel (Admin Only)
 router.get("/export/excel", protect, admin, exportLeavesToExcel);

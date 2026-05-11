@@ -3,9 +3,11 @@
 const express = require("express");
 const {
   addRoutine,
+  updateRoutine,
   getTeacherRoutines,
   getTeachersByRoutine,
   deleteRoutine,
+  deleteRoutinesByYear,
   bulkUploadRoutines,
 } = require("../controllers/routineController");
 
@@ -26,6 +28,8 @@ const router = express.Router();
 // POST /api/routines - নতুন রুটিন যোগ করা (Admin & Incharge)
 // আগে এখানে 'admin' মিডলওয়্যার ছিল, সেটি সরিয়ে 'protect' রাখা হয়েছে
 router.route("/").post(protect, addRoutine);
+router.route("/:id").put(protect, updateRoutine);
+router.route("/year/:year").delete(protect, admin, deleteRoutinesByYear);
 
 // DELETE /api/routines/:id - নির্দিষ্ট রুটিন মুছে ফেলা (Admin & Incharge)
 router.route("/:id").delete(protect, deleteRoutine);

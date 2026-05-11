@@ -19,9 +19,9 @@ const addTeacher = async (req, res) => {
       });
     }
 
-    const teacherExists = await Teacher.findOne({
-      $or: [{ teacherId }, { phone }],
-    });
+    const duplicateFilters = [{ teacherId }];
+    if (phone) duplicateFilters.push({ phone });
+    const teacherExists = await Teacher.findOne({ $or: duplicateFilters });
     if (teacherExists) {
       return res.status(409).json({
         message: "Conflict detected: Teacher ID or Phone already indexed.",
@@ -53,6 +53,7 @@ const addTeacher = async (req, res) => {
       success: true,
       message: "Neural profile synchronized.",
       data: newTeacher,
+      teacher: newTeacher,
     });
   } catch (error) {
     res.status(500).json({
@@ -65,7 +66,7 @@ const addTeacher = async (req, res) => {
 
 // --- ২. সকল শিক্ষক দেখা ও সার্চ করা ---
 const getAllTeachers = async (req, res) => {
-  const { search, page = 1, limit = 20 } = req.query;
+  const { search, page = 1, limit = 20, includeDetails } = req.query;
   const pageInt = parseInt(page);
   const limitInt = parseInt(limit);
   const skip = (pageInt - 1) * limitInt;
@@ -96,7 +97,120 @@ const getAllTeachers = async (req, res) => {
       .limit(limitInt)
       .skip(skip)
       .populate("campus", "name")
-      .sort({ name: 1 });
+      .sort({ name: 1 })
+      .lean();
+
+    if (includeDetails === "true" && teachers.length > 0) {
+      const currentYear = new Date().getFullYear();
+      const teacherIds = teachers.map(
+        (teacher) => new mongoose.Types.ObjectId(teacher._id)
+      );
+      const assignmentsByTeacher = new Map();
+      const routinesByTeacher = new Map();
+
+      const [assignmentGroups, routineDocs] = await Promise.all([
+        ResponsibilityAssignment.aggregate([
+          { $match: { teacher: { $in: teacherIds } } },
+          {
+            $lookup: {
+              from: "responsibilitytypes",
+              localField: "responsibilityType",
+              foreignField: "_id",
+              as: "typeDetails",
+            },
+          },
+          { $unwind: "$typeDetails" },
+          {
+            $lookup: {
+              from: "classes",
+              localField: "targetClass",
+              foreignField: "_id",
+              as: "classDetails",
+            },
+          },
+          {
+            $unwind: {
+              path: "$classDetails",
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+          {
+            $lookup: {
+              from: "subjects",
+              localField: "targetSubject",
+              foreignField: "_id",
+              as: "subjectDetails",
+            },
+          },
+          {
+            $unwind: {
+              path: "$subjectDetails",
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+          {
+            $group: {
+              _id: { teacher: "$teacher", year: "$year" },
+              responsibilities: {
+                $push: {
+                  _id: "$_id",
+                  name: "$typeDetails.name",
+                  class: { $ifNull: ["$classDetails.name", "N/A"] },
+                  subject: { $ifNull: ["$subjectDetails.name", "N/A"] },
+                  status: "$status",
+                },
+              },
+            },
+          },
+          { $sort: { "_id.year": -1 } },
+        ]),
+        TeacherRoutine.find({ teacher: { $in: teacherIds } })
+          .select("teacher years")
+          .populate({ path: "years.assignments.className", select: "name" })
+          .populate({ path: "years.assignments.subject", select: "name" })
+          .lean(),
+      ]);
+
+      assignmentGroups.forEach((group) => {
+        const teacherKey = String(group._id.teacher);
+        if (!assignmentsByTeacher.has(teacherKey)) {
+          assignmentsByTeacher.set(teacherKey, []);
+        }
+        assignmentsByTeacher.get(teacherKey).push({
+          _id: group._id.year,
+          responsibilities: group.responsibilities,
+        });
+      });
+
+      routineDocs.forEach((routine) => {
+        const teacherKey = String(routine.teacher);
+        const routineSchedule = [];
+
+        routine.years.forEach((yearBlock) => {
+          if (yearBlock.year === currentYear) {
+            yearBlock.assignments.forEach((assignment) => {
+              routineSchedule.push({
+                _id: assignment._id,
+                year: yearBlock.year,
+                display: `${assignment.subject?.name || "N/A"} [${
+                  assignment.className?.name || "N/A"
+                }] - ${yearBlock.year}`,
+                classNameId: assignment.className?._id,
+                subjectId: assignment.subject?._id,
+              });
+            });
+          }
+        });
+
+        routinesByTeacher.set(teacherKey, routineSchedule);
+      });
+
+      teachers.forEach((teacher) => {
+        const teacherKey = String(teacher._id);
+        teacher.assignmentsByYear = assignmentsByTeacher.get(teacherKey) || [];
+        teacher.routineSchedule = routinesByTeacher.get(teacherKey) || [];
+      });
+    }
 
     res.json({
       teachers,
@@ -282,9 +396,106 @@ const bulkUploadTeachers = async (req, res) => {
   try {
     const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
     const sheetData = xlsx.utils.sheet_to_json(
-      workbook.Sheets[workbook.SheetNames[0]]
+      workbook.Sheets[workbook.SheetNames[0]],
+      { defval: "" }
     );
-    res.status(200).json({ message: "Bulk aggregation processed." });
+
+    const branches = await Branch.find({ isActive: true }).lean();
+    const branchMap = new Map(
+      branches.flatMap((branch) => [
+        [branch.name?.toLowerCase(), branch],
+        [branch.location?.toLowerCase(), branch],
+      ])
+    );
+
+    const errors = [];
+    const createdTeachers = [];
+
+    for (let index = 0; index < sheetData.length; index++) {
+      const row = sheetData[index];
+      const rowNumber = index + 2;
+      const normalizedRow = Object.fromEntries(
+        Object.entries(row).map(([key, value]) => [
+          key.toLowerCase().trim().replace(/\s/g, ""),
+          value,
+        ])
+      );
+
+      const teacherId = String(
+        normalizedRow.teacherid || normalizedRow.id || ""
+      ).trim();
+      const name = String(normalizedRow.name || normalizedRow.teachername || "")
+        .trim();
+      const phone = String(normalizedRow.phone || normalizedRow.mobile || "")
+        .trim();
+      const designation = String(normalizedRow.designation || "").trim();
+      const campusName = String(
+        normalizedRow.campus ||
+          normalizedRow.branch ||
+          normalizedRow.branchname ||
+          ""
+      )
+        .trim()
+        .toLowerCase();
+
+      if (!teacherId || !name) {
+        errors.push(`Row ${rowNumber}: Teacher ID and Name are required.`);
+        continue;
+      }
+
+      let campusId = req.user.role === "incharge" ? req.user.campus : null;
+      if (req.user.role === "admin") {
+        const branch = branchMap.get(campusName);
+        if (!branch) {
+          errors.push(`Row ${rowNumber}: Campus/Branch not found.`);
+          continue;
+        }
+        campusId = branch._id;
+      }
+
+      if (!campusId) {
+        errors.push(`Row ${rowNumber}: Campus is required.`);
+        continue;
+      }
+
+      const branch = await Branch.findById(campusId);
+      if (!branch) {
+        errors.push(`Row ${rowNumber}: Assigned campus does not exist.`);
+        continue;
+      }
+
+      if (
+        req.user.role === "incharge" &&
+        campusName &&
+        branch.name.toLowerCase() !== campusName
+      ) {
+        errors.push(`Row ${rowNumber}: Campus is outside your access scope.`);
+        continue;
+      }
+
+      const duplicateFilters = [{ teacherId }];
+      if (phone) duplicateFilters.push({ phone });
+      const existingTeacher = await Teacher.findOne({ $or: duplicateFilters });
+      if (existingTeacher) {
+        errors.push(`Row ${rowNumber}: Teacher ID or Phone already exists.`);
+        continue;
+      }
+
+      const teacher = await Teacher.create({
+        teacherId,
+        name,
+        phone,
+        campus: campusId,
+        designation,
+      });
+      createdTeachers.push(teacher);
+    }
+
+    res.status(200).json({
+      message: `Bulk add completed. ${createdTeachers.length} teachers indexed.`,
+      savedCount: createdTeachers.length,
+      errors,
+    });
   } catch (error) {
     res.status(500).json({ message: "Bulk upload failed: " + error.message });
   }
