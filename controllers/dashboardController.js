@@ -14,23 +14,107 @@ const getSelectedYear = (req) => {
   return req.query.year ? parseInt(req.query.year) : new Date().getFullYear();
 };
 
+const isIncharge = (req) => req.user?.role === "incharge";
+
+const getUserCampusId = (req) =>
+  req.user?.campus?._id || req.user?.campus || null;
+
+const requireInchargeCampus = (req) => {
+  const campusId = getUserCampusId(req);
+  if (isIncharge(req) && !campusId) {
+    const error = new Error("No Campus/Shift is assigned to this incharge.");
+    error.statusCode = 403;
+    throw error;
+  }
+  if (campusId && !mongoose.Types.ObjectId.isValid(campusId)) {
+    const error = new Error("Assigned Campus/Shift is invalid.");
+    error.statusCode = 403;
+    throw error;
+  }
+  return campusId;
+};
+
+const sendDashboardError = (res, error, fallbackMessage) => {
+  res.status(error.statusCode || 500).json({
+    message: error.message || fallbackMessage,
+  });
+};
+
+const getScopedTeacherQuery = (req) => {
+  if (!isIncharge(req)) return {};
+  return { campus: requireInchargeCampus(req) };
+};
+
+const getScopedTeacherIds = async (req) => {
+  if (!isIncharge(req)) return null;
+  const teachers = await Teacher.find(getScopedTeacherQuery(req)).select("_id").lean();
+  return teachers.map((teacher) => teacher._id);
+};
+
+const buildAssignmentPipelineStart = (req, targetYear) => {
+  const pipeline = [
+    { $match: { status: "Assigned", year: targetYear } },
+    {
+      $lookup: {
+        from: "teachers",
+        localField: "teacher",
+        foreignField: "_id",
+        as: "teacherDetails",
+      },
+    },
+    { $unwind: "$teacherDetails" },
+  ];
+
+  if (isIncharge(req)) {
+    const campusObjectId = new mongoose.Types.ObjectId(requireInchargeCampus(req));
+    pipeline.push({
+      $match: {
+        $or: [
+          { teacherCampus: campusObjectId },
+          { "teacherDetails.campus": campusObjectId },
+        ],
+      },
+    });
+  }
+
+  return pipeline;
+};
+
+const countScopedAssignments = async (req, targetYear) => {
+  if (!isIncharge(req)) {
+    return ResponsibilityAssignment.countDocuments({
+      status: "Assigned",
+      year: targetYear,
+    });
+  }
+
+  const result = await ResponsibilityAssignment.aggregate([
+    ...buildAssignmentPipelineStart(req, targetYear),
+    { $count: "count" },
+  ]);
+
+  return result[0]?.count || 0;
+};
+
 // --- ১. ড্যাশবোর্ড সামারি (বছর ভিত্তিক) ---
 const getDashboardSummary = async (req, res) => {
   const targetYear = getSelectedYear(req);
   try {
+    const scopedTeacherQuery = getScopedTeacherQuery(req);
+    const scopedTeacherIds = await getScopedTeacherIds(req);
+    const leaveQuery = { status: "Granted", year: targetYear };
+    if (scopedTeacherIds) leaveQuery.teacher = { $in: scopedTeacherIds };
+
     const results = await Promise.all([
-      Branch.countDocuments(),
+      isIncharge(req) ? Promise.resolve(1) : Branch.countDocuments(),
       Class.countDocuments(),
       Subject.countDocuments(),
       ResponsibilityType.countDocuments(),
-      Teacher.countDocuments(),
+      Teacher.countDocuments(scopedTeacherQuery),
       // শুধুমাত্র নির্দিষ্ট বছরের মঞ্জুরকৃত ছুটি
-      Leave.countDocuments({ status: "Granted", year: targetYear }),
+      Leave.countDocuments(leaveQuery),
       // শুধুমাত্র নির্দিষ্ট বছরের সক্রিয় দায়িত্ব
-      ResponsibilityAssignment.countDocuments({
-        status: "Assigned",
-        year: targetYear,
-      }),
+      countScopedAssignments(req, targetYear),
     ]);
 
     res.json({
@@ -44,7 +128,7 @@ const getDashboardSummary = async (req, res) => {
       activeSession: targetYear,
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch dashboard summary." });
+    sendDashboardError(res, error, "Failed to fetch dashboard summary.");
   }
 };
 
@@ -53,7 +137,7 @@ const getTopResponsibleTeachers = async (req, res) => {
   const targetYear = getSelectedYear(req);
   try {
     const topTeachers = await ResponsibilityAssignment.aggregate([
-      { $match: { status: "Assigned", year: targetYear } },
+      ...buildAssignmentPipelineStart(req, targetYear),
       { $group: { _id: "$teacher", totalDuties: { $sum: 1 } } },
       { $sort: { totalDuties: -1 } },
       { $limit: 10 },
@@ -77,7 +161,7 @@ const getTopResponsibleTeachers = async (req, res) => {
     ]);
     res.json(topTeachers);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch top teachers list." });
+    sendDashboardError(res, error, "Failed to fetch top teachers list.");
   }
 };
 
@@ -86,7 +170,7 @@ const getAssignmentByDutyType = async (req, res) => {
   const targetYear = getSelectedYear(req);
   try {
     const analyticsData = await ResponsibilityAssignment.aggregate([
-      { $match: { status: "Assigned", year: targetYear } },
+      ...buildAssignmentPipelineStart(req, targetYear),
       {
         $lookup: {
           from: "responsibilitytypes",
@@ -108,7 +192,7 @@ const getAssignmentByDutyType = async (req, res) => {
     ]);
     res.json(analyticsData);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch duty type analysis." });
+    sendDashboardError(res, error, "Failed to fetch duty type analysis.");
   }
 };
 
@@ -117,16 +201,7 @@ const getAssignmentByBranch = async (req, res) => {
   const targetYear = getSelectedYear(req);
   try {
     const analyticsData = await ResponsibilityAssignment.aggregate([
-      { $match: { status: "Assigned", year: targetYear } },
-      {
-        $lookup: {
-          from: "teachers",
-          localField: "teacher",
-          foreignField: "_id",
-          as: "teacherDetails",
-        },
-      },
-      { $unwind: "$teacherDetails" },
+      ...buildAssignmentPipelineStart(req, targetYear),
       {
         $lookup: {
           from: "branches",
@@ -148,7 +223,7 @@ const getAssignmentByBranch = async (req, res) => {
     ]);
     res.json(analyticsData);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch branch analysis." });
+    sendDashboardError(res, error, "Failed to fetch branch analysis.");
   }
 };
 
@@ -156,7 +231,11 @@ const getAssignmentByBranch = async (req, res) => {
 const getRecentGrantedLeaves = async (req, res) => {
   const targetYear = getSelectedYear(req);
   try {
-    const leaves = await Leave.find({ status: "Granted", year: targetYear })
+    const scopedTeacherIds = await getScopedTeacherIds(req);
+    const query = { status: "Granted", year: targetYear };
+    if (scopedTeacherIds) query.teacher = { $in: scopedTeacherIds };
+
+    const leaves = await Leave.find(query)
       .sort({ createdAt: -1 })
       .limit(10)
       .populate({
@@ -168,7 +247,7 @@ const getRecentGrantedLeaves = async (req, res) => {
 
     res.json(leaves);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch recent leaves." });
+    sendDashboardError(res, error, "Failed to fetch recent leaves.");
   }
 };
 

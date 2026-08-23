@@ -27,7 +27,11 @@ const protect = async (req, res, next) => {
       const decoded = jwt.verify(token, JWT_SECRET);
 
       // ডাটাবেস থেকে ইউজার খুঁজে বের করা (পাসওয়ার্ড বাদে)
-      req.user = await User.findById(decoded.id).select("-password");
+      req.user = await User.findById(decoded.id)
+        .select("-password")
+        .populate("campus", "name")
+        .populate("campuses", "name")
+        .populate("teacherProfile", "name teacherId");
 
       // ইউজার অস্তিত্বহীন হলে
       if (!req.user) {
@@ -79,19 +83,35 @@ const admin = (req, res, next) => {
   }
 };
 
+const authorizeRoles =
+  (...allowedRoles) =>
+  (req, res, next) => {
+    if (req.user && allowedRoles.includes(req.user.role)) {
+      return next();
+    }
+
+    return res.status(403).json({
+      success: false,
+      message: `Access denied. Role: ${
+        req.user?.role || "Guest"
+      } is not authorized to access this resource.`,
+    });
+  };
+
 /**
  * @desc মাল্টি-রোল এক্সেস (অ্যাডমিন বা ইনচার্জ উভয়ের জন্য)
  */
 const staffOnly = (req, res, next) => {
-  const allowedRoles = ["admin", "incharge"];
+  const allowedRoles = ["admin", "head_teacher", "coordinator", "incharge"];
   if (req.user && allowedRoles.includes(req.user.role)) {
     next();
   } else {
     return res.status(403).json({
       success: false,
-      message: "Access restricted. Only Admin or Incharge can access this.",
+      message:
+        "Access restricted. Only Admin, Head Teacher, Coordinator or Incharge can access this.",
     });
   }
 };
 
-module.exports = { protect, admin, staffOnly };
+module.exports = { protect, admin, authorizeRoles, staffOnly };

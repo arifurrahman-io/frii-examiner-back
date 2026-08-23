@@ -7,7 +7,14 @@ const {
   getAssignmentByDutyType,
   getAssignmentByBranch,
 } = require("../controllers/dashboardController");
-const { protect } = require("../middleware/authMiddleware");
+const { protect, authorizeRoles } = require("../middleware/authMiddleware");
+
+const dashboardAccess = authorizeRoles(
+  "admin",
+  "head_teacher",
+  "coordinator",
+  "incharge"
+);
 
 /**
  * 🛡️ সকল রাউট 'protect' মিডলওয়্যার দ্বারা সুরক্ষিত।
@@ -15,19 +22,34 @@ const { protect } = require("../middleware/authMiddleware");
  */
 
 // ড্যাশবোর্ড সামারি (KPIs)
-router.get("/summary", protect, getDashboardSummary);
+router.get("/summary", protect, dashboardAccess, getDashboardSummary);
 
 // শীর্ষ দায়িত্বপ্রাপ্ত শিক্ষকদের তালিকা
-router.get("/top-teachers", protect, getTopResponsibleTeachers);
+router.get("/top-teachers", protect, dashboardAccess, getTopResponsibleTeachers);
 
 // সাম্প্রতিক মঞ্জুরকৃত ছুটির তালিকা
-router.get("/recent-granted-leaves", protect, getRecentGrantedLeaves);
+router.get(
+  "/recent-granted-leaves",
+  protect,
+  dashboardAccess,
+  getRecentGrantedLeaves
+);
 
 // ডিউটি টাইপ অনুযায়ী অ্যানালিটিক্স (চার্টের জন্য)
-router.get("/assignment-by-type", protect, getAssignmentByDutyType);
+router.get(
+  "/assignment-by-type",
+  protect,
+  dashboardAccess,
+  getAssignmentByDutyType
+);
 
 // ব্রাঞ্চ বা ক্যাম্পাস ভিত্তিক অ্যানালিটিক্স (চার্টের জন্য)
-router.get("/assignment-by-branch", protect, getAssignmentByBranch);
+router.get(
+  "/assignment-by-branch",
+  protect,
+  dashboardAccess,
+  getAssignmentByBranch
+);
 
 /**
  * 💡 নোট: আপনার কন্ট্রোলার ফাইলে 'getAssignmentAnalytics' নামে

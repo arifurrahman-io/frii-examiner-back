@@ -3,12 +3,61 @@ const Branch = require("../models/BranchModel");
 const ResponsibilityAssignment = require("../models/ResponsibilityAssignmentModel");
 const TeacherRoutine = require("../models/RoutineModel"); // রুটিন মডেল
 const GrantedLeave = require("../models/LeaveModel"); // লিভ মডেল
+const ClassPerformanceObservation = require("../models/ClassPerformanceObservationModel");
 const mongoose = require("mongoose");
-const xlsx = require("xlsx");
+const { houseRentFromBasic } = require("../utils/salarySplit");
+
+const teacherRatingReportRoles = [
+  "admin",
+  "head_teacher",
+  "coordinator",
+  "incharge",
+];
+const teacherDirectoryRoles = [...teacherRatingReportRoles, "executive"];
+const schoolWideRatingReportRoles = ["admin", "head_teacher"];
+const limitedTeacherEditRoles = ["executive", "head_teacher"];
+
+const getScopedCampusIds = (user) => {
+  if (!user) return [];
+  if (user.role === "incharge") {
+    const id = user.campus?._id || user.campus;
+    return id ? [String(id)] : [];
+  }
+  if (user.role === "coordinator" || user.role === "executive") {
+    return (user.campuses || [])
+      .map((item) => String(item._id || item))
+      .filter(Boolean);
+  }
+  return [];
+};
+
+const canViewTeacher = (user, teacher) => {
+  if (!user || !teacher || !teacherDirectoryRoles.includes(user.role)) {
+    return false;
+  }
+  if (schoolWideRatingReportRoles.includes(user.role)) return true;
+
+  const teacherCampusId = String(teacher.campus?._id || teacher.campus || "");
+  const allowed = getScopedCampusIds(user);
+  return allowed.includes(teacherCampusId);
+};
+
+const canRateOrReportTeacher = (user, teacher) => {
+  if (!user || !teacherRatingReportRoles.includes(user.role)) return false;
+  return canViewTeacher(user, teacher);
+};
+
+const denyTeacherRatingReportAccess = (res) =>
+  res.status(403).json({
+    success: false,
+    message:
+      "Access denied. Incharges can rate/report only their branch teachers; headmaster can rate/report all school teachers.",
+  });
 
 // --- ১. নতুন শিক্ষক যোগ করা ---
 const addTeacher = async (req, res) => {
-  const { teacherId, name, phone, campus, designation } = req.body;
+  const { teacherId, name, banglaName, phone, campus, designation, basicSalary, houseRent } =
+    req.body;
   try {
     const targetCampusId =
       req.user.role === "incharge" ? req.user.campus : campus;
@@ -44,9 +93,12 @@ const addTeacher = async (req, res) => {
     const newTeacher = await Teacher.create({
       teacherId,
       name,
+      banglaName: String(banglaName || "").trim(),
       phone,
       campus: branch._id,
       designation,
+      basicSalary: Math.max(0, Number(basicSalary) || 0),
+      houseRent: houseRentFromBasic(basicSalary),
     });
 
     res.status(201).json({
@@ -66,15 +118,30 @@ const addTeacher = async (req, res) => {
 
 // --- ২. সকল শিক্ষক দেখা ও সার্চ করা ---
 const getAllTeachers = async (req, res) => {
-  const { search, page = 1, limit = 20, includeDetails } = req.query;
+  const { search, page = 1, limit = 20, includeDetails, campus } = req.query;
   const pageInt = parseInt(page);
   const limitInt = parseInt(limit);
   const skip = (pageInt - 1) * limitInt;
 
   try {
+    if (!teacherDirectoryRoles.includes(req.user.role)) {
+      return denyTeacherRatingReportAccess(res);
+    }
+
     let query = {};
     if (req.user.role === "incharge") {
       query.campus = req.user.campus;
+    } else if (
+      req.user.role === "coordinator" ||
+      req.user.role === "executive"
+    ) {
+      const campusIds = getScopedCampusIds(req.user);
+      query.campus = { $in: campusIds };
+    } else if (campus) {
+      if (!mongoose.Types.ObjectId.isValid(campus)) {
+        return res.status(400).json({ message: "Invalid Campus/Shift ID." });
+      }
+      query.campus = campus;
     }
 
     if (search) {
@@ -84,6 +151,7 @@ const getAllTeachers = async (req, res) => {
         {
           $or: [
             { name: searchRegex },
+            { banglaName: searchRegex },
             { teacherId: searchRegex },
             { phone: searchRegex },
           ],
@@ -237,13 +305,8 @@ const getTeacherProfile = async (req, res) => {
     if (!teacher)
       return res.status(404).json({ message: "Teacher node not found." });
 
-    if (
-      req.user.role === "incharge" &&
-      String(teacher.campus._id) !== String(req.user.campus)
-    ) {
-      return res
-        .status(403)
-        .json({ message: "Access Denied: Vector Mismatch." });
+    if (!canViewTeacher(req.user, teacher)) {
+      return denyTeacherRatingReportAccess(res);
     }
 
     const assignmentsByYear = await ResponsibilityAssignment.aggregate([
@@ -319,6 +382,8 @@ const deleteTeacher = async (req, res) => {
     }
 
     // 🛡️ CRITICAL ACTION: ডিলিট করার আগে সংশ্লিষ্ট সকল ডেটা মুছে ফেলা হচ্ছে
+    await ClassPerformanceObservation.deleteMany({ teacher: teacherId });
+
     await Promise.all([
       Teacher.findByIdAndDelete(teacherId), // শিক্ষক ডিলিট
       ResponsibilityAssignment.deleteMany({ teacher: teacherId }), // সকল অ্যাসাইনমেন্ট ডিলিট
@@ -346,11 +411,8 @@ const addAnnualReport = async (req, res) => {
     const teacher = await Teacher.findById(teacherObjectId);
     if (!teacher)
       return res.status(404).json({ message: "Teacher not found." });
-    if (
-      req.user.role === "incharge" &&
-      String(teacher.campus) !== String(req.user.campus)
-    ) {
-      return res.status(403).json({ message: "Unauthorized node access." });
+    if (!canRateOrReportTeacher(req.user, teacher)) {
+      return denyTeacherRatingReportAccess(res);
     }
     teacher.reports.push({
       year: Number(year),
@@ -374,15 +436,64 @@ const updateTeacher = async (req, res) => {
     const teacherToUpdate = await Teacher.findById(teacherObjectId);
     if (!teacherToUpdate)
       return res.status(404).json({ message: "Teacher not found." });
-    if (
-      req.user.role === "incharge" &&
-      String(teacherToUpdate.campus) !== String(req.user.campus)
-    ) {
+
+    const isAdmin = req.user.role === "admin";
+    const isLimitedEditor = limitedTeacherEditRoles.includes(req.user.role);
+    if (!isAdmin && !isLimitedEditor) {
       return res.status(403).json({ message: "Restriction: External node." });
+    }
+
+    if (req.user.role === "executive") {
+      const allowed = getScopedCampusIds(req.user);
+      if (!allowed.includes(String(teacherToUpdate.campus))) {
+        return res.status(403).json({ message: "Restriction: External node." });
+      }
+    }
+
+    const payload = {};
+    const allowed = isAdmin
+      ? [
+          "name",
+          "banglaName",
+          "phone",
+          "campus",
+          "designation",
+          "isActive",
+          "basicSalary",
+          "houseRent",
+          "salaryBankAccount",
+          "pfBankAccount",
+          "providentFundEnabled",
+        ]
+      : [
+          "name",
+          "basicSalary",
+          "salaryBankAccount",
+          "pfBankAccount",
+          "providentFundEnabled",
+        ];
+    allowed.forEach((key) => {
+      if (req.body[key] !== undefined) payload[key] = req.body[key];
+    });
+    if (payload.basicSalary !== undefined) {
+      payload.basicSalary = Math.max(0, Number(payload.basicSalary) || 0);
+      payload.houseRent = houseRentFromBasic(payload.basicSalary);
+    }
+    if (payload.banglaName !== undefined) {
+      payload.banglaName = String(payload.banglaName || "").trim();
+    }
+    if (payload.salaryBankAccount !== undefined) {
+      payload.salaryBankAccount = String(payload.salaryBankAccount || "").trim();
+    }
+    if (payload.pfBankAccount !== undefined) {
+      payload.pfBankAccount = String(payload.pfBankAccount || "").trim();
+    }
+    if (payload.providentFundEnabled !== undefined) {
+      payload.providentFundEnabled = Boolean(payload.providentFundEnabled);
     }
     const updatedTeacher = await Teacher.findByIdAndUpdate(
       teacherObjectId,
-      { $set: req.body },
+      { $set: payload },
       { new: true, runValidators: true }
     ).populate("campus", "name");
     res.json({ message: "Teacher synchronized.", teacher: updatedTeacher });
@@ -429,6 +540,17 @@ const bulkUploadTeachers = async (req, res) => {
       const phone = String(normalizedRow.phone || normalizedRow.mobile || "")
         .trim();
       const designation = String(normalizedRow.designation || "").trim();
+      const banglaName = String(
+        normalizedRow.banglaname ||
+          normalizedRow.bangla ||
+          normalizedRow.namebn ||
+          ""
+      ).trim();
+      const basicSalary = Math.max(
+        0,
+        Number(normalizedRow.basicsalary || normalizedRow.basic || 0) || 0
+      );
+      const houseRent = houseRentFromBasic(basicSalary);
       const campusName = String(
         normalizedRow.campus ||
           normalizedRow.branch ||
@@ -484,9 +606,12 @@ const bulkUploadTeachers = async (req, res) => {
       const teacher = await Teacher.create({
         teacherId,
         name,
+        banglaName,
         phone,
         campus: campusId,
         designation,
+        basicSalary,
+        houseRent,
       });
       createdTeachers.push(teacher);
     }

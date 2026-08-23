@@ -13,6 +13,12 @@ const TeacherSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    banglaName: {
+      type: String,
+      required: false,
+      trim: true,
+      default: "",
+    },
     phone: {
       type: String,
       required: false,
@@ -31,6 +37,30 @@ const TeacherSchema = new mongoose.Schema(
     designation: {
       type: String,
       required: false,
+    },
+    basicSalary: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    houseRent: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    salaryBankAccount: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    pfBankAccount: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    providentFundEnabled: {
+      type: Boolean,
+      default: false,
     },
     isActive: {
       type: Boolean,

@@ -4,10 +4,35 @@ const Class = require("../models/ClassModel");
 const Subject = require("../models/SubjectModel");
 const Branch = require("../models/BranchModel");
 const ResponsibilityAssignment = require("../models/ResponsibilityAssignmentModel");
-const User = require("../models/UserModel");
-const bcrypt = require("bcryptjs");
+const { verifyAdminPassword } = require("../utils/adminSecurity");
+const {
+  getUserCampusIds,
+  SCHOOL_WIDE_ROLES,
+} = require("../utils/incrementAccess");
 const xlsx = require("xlsx");
 const mongoose = require("mongoose");
+
+const ROUTINE_WRITE_ROLES = [
+  "admin",
+  "head_teacher",
+  "incharge",
+  "executive",
+];
+
+const campusIdOf = (value) => String(value?._id || value || "");
+
+const canManageRoutineForCampus = (user, campusId) => {
+  if (!user || !ROUTINE_WRITE_ROLES.includes(user.role)) return false;
+  if (SCHOOL_WIDE_ROLES.includes(user.role)) return true;
+  return getUserCampusIds(user).includes(campusIdOf(campusId));
+};
+
+const denyRoutineAccess = (res, message) =>
+  res.status(403).json({
+    message:
+      message ||
+      "Access Denied: You can only manage routines for teachers in your assigned campus.",
+  });
 
 const normalizeLookupKey = (value) => value?.toString().trim().toLowerCase();
 const normalizeTeacherId = (value) => value?.toString().trim();
@@ -47,17 +72,20 @@ const addRoutine = async (req, res) => {
   const yearInt = parseInt(year);
 
   try {
-    // 🛡️ ROLE PROTECTION
-    if (req.user.role === "incharge") {
+    if (!ROUTINE_WRITE_ROLES.includes(req.user.role)) {
+      return denyRoutineAccess(
+        res,
+        "Access denied. Routine setup is limited to admin, head teacher, incharge, or executive."
+      );
+    }
+
+    if (!SCHOOL_WIDE_ROLES.includes(req.user.role)) {
       const targetTeacher = await Teacher.findById(teacher);
       if (
         !targetTeacher ||
-        String(targetTeacher.campus) !== String(req.user.campus)
+        !canManageRoutineForCampus(req.user, targetTeacher.campus)
       ) {
-        return res.status(403).json({
-          message:
-            "Access Denied: You can only manage routines for teachers in your campus node.",
-        });
+        return denyRoutineAccess(res);
       }
     }
 
@@ -120,16 +148,16 @@ const getTeacherRoutines = async (req, res) => {
   const { year } = req.query;
 
   try {
-    // 🛡️ ROLE PROTECTION
-    if (req.user.role === "incharge") {
+    if (!SCHOOL_WIDE_ROLES.includes(req.user.role) && ROUTINE_WRITE_ROLES.includes(req.user.role)) {
       const targetTeacher = await Teacher.findById(teacherId);
       if (
         !targetTeacher ||
-        String(targetTeacher.campus) !== String(req.user.campus)
+        !canManageRoutineForCampus(req.user, targetTeacher.campus)
       ) {
-        return res.status(403).json({
-          message: "Access Denied: Teacher belongs to a different campus node.",
-        });
+        return denyRoutineAccess(
+          res,
+          "Access Denied: Teacher belongs to a different campus node."
+        );
       }
     }
 
@@ -152,7 +180,9 @@ const getTeacherRoutines = async (req, res) => {
               r.className?.name || "N/A"
             }] - ${y.year}`,
             classNameId: r.className?._id,
+            className: r.className?.name || "N/A",
             subjectId: r.subject?._id,
+            subject: r.subject?.name || "N/A",
           });
         });
       }
@@ -184,15 +214,23 @@ const updateRoutine = async (req, res) => {
       return res.status(404).json({ message: "Routine entry not found." });
     }
 
-    if (req.user.role === "incharge") {
+    if (!ROUTINE_WRITE_ROLES.includes(req.user.role)) {
+      return denyRoutineAccess(
+        res,
+        "Access denied. Routine setup is limited to admin, head teacher, incharge, or executive."
+      );
+    }
+
+    if (!SCHOOL_WIDE_ROLES.includes(req.user.role)) {
       const targetTeacher = await Teacher.findById(routineDoc.teacher);
       if (
         !targetTeacher ||
-        String(targetTeacher.campus) !== String(req.user.campus)
+        !canManageRoutineForCampus(req.user, targetTeacher.campus)
       ) {
-        return res.status(403).json({
-          message: "Unauthorized: Access denied for this campus node.",
-        });
+        return denyRoutineAccess(
+          res,
+          "Unauthorized: Access denied for this campus node."
+        );
       }
     }
 
@@ -290,13 +328,13 @@ const getTeachersByRoutine = async (req, res) => {
       .map((routine) => ({ routine, teacher: routine.teacher }))
       .filter((entry) => entry.teacher);
 
-    // 🛡️ ROLE FILTERING
-    if (req.user.role === "incharge") {
-      eligibleEntries = eligibleEntries.filter(
-        ({ teacher }) =>
-          String(teacher.campus?._id || teacher.campus) ===
-          String(req.user.campus)
-      );
+    if (!SCHOOL_WIDE_ROLES.includes(req.user.role)) {
+      const allowed = getUserCampusIds(req.user);
+      if (allowed.length) {
+        eligibleEntries = eligibleEntries.filter(({ teacher }) =>
+          allowed.includes(campusIdOf(teacher.campus))
+        );
+      }
     }
 
     const teacherIds = eligibleEntries.map(
@@ -381,7 +419,9 @@ const getTeachersByRoutine = async (req, res) => {
                 assignment.className?.name || "N/A"
               }] - ${yearBlock.year}`,
               classNameId: assignment.className?._id,
+              className: assignment.className?.name || "N/A",
               subjectId: assignment.subject?._id,
+              subject: assignment.subject?.name || "N/A",
             });
           });
         }
@@ -417,13 +457,23 @@ const deleteRoutine = async (req, res) => {
     if (!routineDoc)
       return res.status(404).json({ message: "Routine entry not found." });
 
-    // 🛡️ ROLE PROTECTION
-    if (req.user.role === "incharge") {
+    if (!ROUTINE_WRITE_ROLES.includes(req.user.role)) {
+      return denyRoutineAccess(
+        res,
+        "Access denied. Routine setup is limited to admin, head teacher, incharge, or executive."
+      );
+    }
+
+    if (!SCHOOL_WIDE_ROLES.includes(req.user.role)) {
       const targetTeacher = await Teacher.findById(routineDoc.teacher);
-      if (String(targetTeacher.campus) !== String(req.user.campus)) {
-        return res.status(403).json({
-          message: "Unauthorized: Access denied for this campus node.",
-        });
+      if (
+        !targetTeacher ||
+        !canManageRoutineForCampus(req.user, targetTeacher.campus)
+      ) {
+        return denyRoutineAccess(
+          res,
+          "Unauthorized: Access denied for this campus node."
+        );
       }
     }
 
@@ -447,31 +497,24 @@ const deleteRoutine = async (req, res) => {
  */
 const deleteRoutinesByYear = async (req, res) => {
   const yearInt = parseInt(req.params.year, 10);
-  const { password } = req.body;
+  const { password, confirmYear } = req.body;
 
   if (!yearInt) {
     return res.status(400).json({ message: "A valid year is required." });
   }
 
-  if (!password) {
-    return res.status(400).json({ message: "Admin password is required." });
+  if (String(confirmYear || "").trim() !== String(yearInt)) {
+    return res.status(400).json({
+      message: "Year confirmation did not match. Routine deletion was not started.",
+    });
+  }
+
+  const authResult = await verifyAdminPassword(req.user._id, password);
+  if (!authResult.ok) {
+    return res.status(authResult.status).json({ message: authResult.message });
   }
 
   try {
-    const adminUser = await User.findById(req.user._id).select("+password");
-
-    if (!adminUser || adminUser.role !== "admin") {
-      return res.status(403).json({ message: "Admin authorization failed." });
-    }
-
-    const passwordMatches = await bcrypt.compare(password, adminUser.password);
-
-    if (!passwordMatches) {
-      return res.status(401).json({
-        message: "Admin password did not match. Routine deletion was not started.",
-      });
-    }
-
     const matchedRoutineDocs = await Routine.find({ "years.year": yearInt })
       .select("years")
       .lean();
@@ -509,6 +552,13 @@ const deleteRoutinesByYear = async (req, res) => {
  */
 const bulkUploadRoutines = async (req, res) => {
   if (!req.file) return res.status(400).json({ message: "No file uploaded." });
+
+  if (!ROUTINE_WRITE_ROLES.includes(req.user.role)) {
+    return denyRoutineAccess(
+      res,
+      "Access denied. Routine setup is limited to admin, head teacher, incharge, or executive."
+    );
+  }
 
   try {
     const duplicateMode =
@@ -628,15 +678,13 @@ const bulkUploadRoutines = async (req, res) => {
         updateProgress();
         continue;
       }
-      if (req.user.role === "incharge") {
-        if (String(targetBranch._id) !== String(req.user.campus)) {
-          bulkErrors.push(
-            `Row ${rowNum}: Denied. Branch "${branchName}" is not your assigned campus.`
-          );
-          stats.failedCount++;
-          updateProgress();
-          continue;
-        }
+      if (!canManageRoutineForCampus(req.user, targetBranch._id)) {
+        bulkErrors.push(
+          `Row ${rowNum}: Denied. Branch "${branchName}" is not your assigned campus.`
+        );
+        stats.failedCount++;
+        updateProgress();
+        continue;
       }
 
       let teacherDoc = teacherIdMap.get(teacherId);

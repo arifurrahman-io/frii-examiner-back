@@ -10,7 +10,12 @@ const {
   bulkUploadTeachers,
 } = require("../controllers/teacherController");
 
-const { protect, admin, staffOnly } = require("../middleware/authMiddleware");
+const {
+  protect,
+  admin,
+  authorizeRoles,
+  staffOnly,
+} = require("../middleware/authMiddleware");
 const upload = require("../middleware/uploadMiddleware");
 
 const router = express.Router();
@@ -19,9 +24,19 @@ const router = express.Router();
 router
   .route("/")
   // সকল শিক্ষক দেখা ও সার্চ করা
-  .get(protect, getAllTeachers)
+  .get(
+    protect,
+    authorizeRoles(
+      "admin",
+      "head_teacher",
+      "coordinator",
+      "incharge",
+      "executive"
+    ),
+    getAllTeachers
+  )
   // নতুন শিক্ষক যুক্ত করা
-  .post(protect, staffOnly, addTeacher);
+  .post(protect, authorizeRoles("admin", "incharge"), addTeacher);
 
 // --- 📤 Bulk Upload Route ---
 router.post("/bulk-upload", protect, admin, upload, bulkUploadTeachers);
@@ -36,9 +51,23 @@ router.delete("/:id/reports/:reportId", protect, admin, deleteAnnualReport);
 router
   .route("/:id")
   // প্রোফাইল দেখা
-  .get(protect, staffOnly, getTeacherProfile)
-  // তথ্য আপডেট করা
-  .put(protect, admin, updateTeacher)
+  .get(
+    protect,
+    authorizeRoles(
+      "admin",
+      "head_teacher",
+      "coordinator",
+      "incharge",
+      "executive"
+    ),
+    getTeacherProfile
+  )
+  // তথ্য আপডেট করা — admin full; head teacher / executive: name + basic salary
+  .put(
+    protect,
+    authorizeRoles("admin", "head_teacher", "executive"),
+    updateTeacher
+  )
   // শিক্ষক স্থায়ীভাবে মুছে ফেলা
   .delete(protect, admin, deleteTeacher);
 

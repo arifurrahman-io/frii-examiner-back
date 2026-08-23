@@ -23,6 +23,9 @@ const responsibilityTypeRoutes = require("./routes/responsibilityTypeRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const leaveRoutes = require("./routes/leaveRoutes");
 const userRoutes = require("./routes/userRoutes");
+const classPerformanceRoutes = require("./routes/classPerformanceRoutes");
+const incrementRoutes = require("./routes/incrementRoutes");
+const payrollRoutes = require("./routes/payrollRoutes");
 
 const app = express();
 
@@ -40,7 +43,9 @@ const allowedOrigins = [
       process.env.CORS_ORIGIN,
       process.env.CLIENT_URL,
       process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "",
-      "http://localhost:5173,http://localhost:4173",
+      "http://localhost,http://localhost:5173,http://localhost:4173",
+      "https://localhost,https://localhost:5173,https://localhost:4173",
+      "capacitor://localhost,ionic://localhost",
       "https://frii-examiner.vercel.app"
     )
   ),
@@ -80,6 +85,9 @@ app.use("/api/responsibility-types", responsibilityTypeRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/leaves", leaveRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/class-performance", classPerformanceRoutes);
+app.use("/api/increment", incrementRoutes);
+app.use("/api/payroll", payrollRoutes);
 
 // ৬. রুট রাউট
 app.get("/", (req, res) => {
@@ -89,7 +97,7 @@ app.get("/", (req, res) => {
 // ৭. অ্যাডভান্সড এরর হ্যান্ডলিং মিডেলওয়্যার
 // এটি ফ্রন্টএন্ডে "Internal Protocol Error" মেসেজ পাঠাতে সাহায্য করবে
 app.use((err, req, res, next) => {
-  const statusCode = res.statusCode === 200 ? 500 : res.statusCode;
+  const statusCode = err.statusCode || (res.statusCode === 200 ? 500 : res.statusCode);
   console.error(`[Matrix Error]: ${err.message}`);
   res.status(statusCode).json({
     success: false,

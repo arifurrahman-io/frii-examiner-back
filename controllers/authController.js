@@ -14,6 +14,20 @@ if (!JWT_SECRET) {
  * JWT Access এবং Refresh Token তৈরি করার হেল্পার ফাংশন
  */
 const generateTokens = (user) => {
+  const campus = user.campus
+    ? {
+        _id: user.campus._id || user.campus,
+        name: user.campus.name,
+      }
+    : undefined;
+
+  const campuses = Array.isArray(user.campuses)
+    ? user.campuses.map((item) => ({
+        _id: item._id || item,
+        name: item.name,
+      }))
+    : [];
+
   const accessToken = jwt.sign(
     {
       id: user._id,
@@ -21,16 +35,18 @@ const generateTokens = (user) => {
       name: user.name || user.username,
       username: user.username,
       email: user.email,
-      campus: user.campus,
+      campus,
+      campuses,
+      teacherProfile: user.teacherProfile || null,
     },
     JWT_SECRET,
-    { expiresIn: "7d" } // সিকিউরিটির জন্য Access Token কম সময়ের রাখা হয়েছে
+    { expiresIn: "7d" }
   );
 
   const refreshToken = jwt.sign(
     { id: user._id },
     REFRESH_SECRET,
-    { expiresIn: "7d" } // সেশন সচল রাখতে Refresh Token দীর্ঘ সময়ের রাখা হয়েছে
+    { expiresIn: "7d" }
   );
 
   return { accessToken, refreshToken };
@@ -58,7 +74,11 @@ const loginUser = async (req, res) => {
         { email: identifier.toLowerCase() },
         { name: identifier },
       ],
-    }).select("+password");
+    })
+      .select("+password")
+      .populate("campus", "name")
+      .populate("campuses", "name")
+      .populate("teacherProfile", "name teacherId");
 
     if (!user) {
       console.log(`Login failed: User not found - ${identifier}`);
@@ -101,7 +121,25 @@ const loginUser = async (req, res) => {
         username: user.username,
         role: user.role,
         email: user.email,
-        campus: user.campus,
+        campus: user.campus
+          ? {
+              _id: user.campus._id || user.campus,
+              name: user.campus.name,
+            }
+          : undefined,
+        campuses: Array.isArray(user.campuses)
+          ? user.campuses.map((item) => ({
+              _id: item._id || item,
+              name: item.name,
+            }))
+          : [],
+        teacherProfile: user.teacherProfile
+          ? {
+              _id: user.teacherProfile._id || user.teacherProfile,
+              name: user.teacherProfile.name,
+              teacherId: user.teacherProfile.teacherId,
+            }
+          : null,
       },
     });
   } catch (error) {
@@ -123,7 +161,10 @@ const refreshAccessToken = async (req, res) => {
 
   try {
     const decoded = jwt.verify(token, REFRESH_SECRET);
-    const user = await User.findById(decoded.id);
+    const user = await User.findById(decoded.id)
+      .populate("campus", "name")
+      .populate("campuses", "name")
+      .populate("teacherProfile", "name teacherId");
 
     if (!user) return res.status(403).json({ message: "User not found" });
 

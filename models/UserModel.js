@@ -8,17 +8,36 @@ const UserSchema = new mongoose.Schema(
     password: { type: String, required: true },
     role: {
       type: String,
-      enum: ["admin", "teacher", "incharge"],
+      enum: [
+        "admin",
+        "head_teacher",
+        "coordinator",
+        "executive",
+        "teacher",
+        "incharge",
+      ],
       default: "teacher",
     },
-    // নতুন ফিল্ড: ইনচার্জ রোল হলে এটি কোন ক্যাম্পাসের তা নির্ধারণ করবে
+    // Shift incharge → single campus/shift Branch
     campus: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Branch",
       required: function () {
-        // যদি রোল 'incharge' হয়, তবে ক্যাম্পাস ফিল্ডটি বাধ্যতামূলক (Required)
         return this.role === "incharge";
       },
+    },
+    // Branch coordinator / executive → multiple campuses/shifts
+    campuses: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Branch",
+      },
+    ],
+    // Link staff login to Teacher profile (for incharge / coordinator evaluation target)
+    teacherProfile: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Teacher",
+      default: null,
     },
     status: { type: String, enum: ["active", "inactive"], default: "active" },
   },

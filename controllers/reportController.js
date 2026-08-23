@@ -5,13 +5,33 @@ const ExaminerExchangeDate = require("../models/ExaminerExchangeDateModel");
 const Routine = require("../models/RoutineModel");
 const Branch = require("../models/BranchModel");
 const Class = require("../models/ClassModel");
+const Subject = require("../models/SubjectModel");
 const { jsPDF } = require("jspdf");
 require("jspdf-autotable");
 
 // Ensure Teacher model exists
 const Teacher = require("../models/TeacherModel"); // adjust path if needed
+const {
+  getUniformBodyStyles,
+  getUniformTableStyles,
+  withUniformHeadStyles,
+  createUniformRowDidParseCell,
+} = require("../utils/pdfTableRows");
+const {
+  BRAND,
+  INSTITUTE_NAME,
+  drawInstituteLogo,
+  drawProfessionalReportHeader,
+} = require("../utils/reportBranding");
 
 const ArrayOfData = (data) => Array.isArray(data) && data.length > 0;
+
+const formatPhoneWithLeadingZero = (phone) => {
+  if (phone === null || phone === undefined || phone === "") return "N/A";
+  const digits = String(phone).replace(/\D/g, "");
+  if (!digits) return "N/A";
+  return digits.startsWith("0") ? digits : `0${digits}`;
+};
 
 // Responsibility type labels expected in yearly pivot (must match responsibility-types.name)
 const RESPONSIBILITY_TYPES = [
@@ -19,10 +39,10 @@ const RESPONSIBILITY_TYPES = [
   "E-HY",
   "Q-Pre-Test",
   "E-Pre-Test",
-  "Q-Annual",
-  "E-Annual",
   "Q-Test",
   "E-Test",
+  "Q-Annual",
+  "E-Annual",
 ];
 
 // --- 🚀 Roman Numeral Map and Conversion Logic ---
@@ -38,6 +58,19 @@ const ROMAN_MAP = {
   NINE: "IX",
   TEN: "X",
 };
+
+const CLASS_ORDER = [
+  "ONE",
+  "TWO",
+  "THREE",
+  "FOUR",
+  "FIVE",
+  "SIX",
+  "SEVEN",
+  "EIGHT",
+  "NINE",
+  "TEN",
+];
 
 const applyRomanNumerals = (assignments) => {
   if (!assignments || typeof assignments !== "object") return assignments;
@@ -70,7 +103,7 @@ const maybeObjectId = (val) => {
   try {
     if (mongoose.Types.ObjectId.isValid(val))
       return new mongoose.Types.ObjectId(val);
-  } catch (e) {}
+  } catch (e) { }
   return null;
 };
 
@@ -80,6 +113,16 @@ const parseObjectIdList = (value) =>
     .map((id) => id.trim())
     .filter((id) => mongoose.Types.ObjectId.isValid(id))
     .map((id) => new mongoose.Types.ObjectId(id));
+
+const parseYearList = (value) =>
+  [
+    ...new Set(
+      String(value ?? "")
+        .split(",")
+        .map((part) => parseInt(String(part).trim(), 10))
+        .filter((year) => Number.isFinite(year) && year >= 2000 && year <= 2100)
+    ),
+  ].sort((a, b) => a - b);
 
 const getReportGeneratedAt = () =>
   new Intl.DateTimeFormat("en-GB", {
@@ -224,7 +267,16 @@ const normalizeSubjectName = (value = "") => {
 };
 
 const EXAMINER_SUBJECT_ORDER = {
-  PRIMARY: ["BENGALI", "ENGLISH", "G.MATH", "R.EDN", "BGS", "G.SCIENCE"],
+  PRIMARY: [
+    "BENGALI",
+    "ENGLISH",
+    "G.MATH",
+    "MATH",
+    "R.EDN",
+    "BGS",
+    "G.SCIENCE",
+    "SCIENCE",
+  ],
   JUNIOR: [
     "BENGALI-I",
     "BENGALI-II",
@@ -242,6 +294,7 @@ const EXAMINER_SUBJECT_ORDER = {
     "ENGLISH-I",
     "ENGLISH-II",
     "G.MATH",
+    "MATH",
     "R.EDN",
     "BGS",
     "PHYSICS",
@@ -272,6 +325,26 @@ const getExaminerSubjectRank = (className = "", subjectName = "") => {
   const order = EXAMINER_SUBJECT_ORDER[group];
   const index = order.indexOf(normalizeSubjectName(subjectName));
   return index === -1 ? 999 : index;
+};
+
+const compareAssignmentReportRows = (a, b) => {
+  const aClassIdx = CLASS_ORDER.indexOf(normalizeReportLabel(a.CLASS));
+  const bClassIdx = CLASS_ORDER.indexOf(normalizeReportLabel(b.CLASS));
+  if (aClassIdx !== bClassIdx) {
+    return (
+      (aClassIdx === -1 ? 999 : aClassIdx) -
+      (bClassIdx === -1 ? 999 : bClassIdx)
+    );
+  }
+
+  const aSubIdx = getExaminerSubjectRank(a.CLASS, a.SUBJECT);
+  const bSubIdx = getExaminerSubjectRank(b.CLASS, b.SUBJECT);
+  if (aSubIdx !== bSubIdx) return aSubIdx - bSubIdx;
+
+  const subjectCompare = (a.SUBJECT || "").localeCompare(b.SUBJECT || "");
+  if (subjectCompare !== 0) return subjectCompare;
+
+  return (a.TEACHER || "").localeCompare(b.TEACHER || "");
 };
 
 const isSeniorExaminerClass = (className = "") =>
@@ -373,28 +446,52 @@ const buildExaminerReportBody = ({
   grouped.forEach((subjectMap, className) => {
     const body = [];
     subjectMap.forEach((subjectRows, subjectName) => {
-      const first = subjectRows[0] || {};
-      const second = subjectRows[1] || {};
-      const exchangeDate =
-        exchangeDateMap[
+      for (let i = 0; i < subjectRows.length; i += 2) {
+        const first = subjectRows[i] || {};
+        const second = subjectRows[i + 1] || {};
+        const isFirstRow = i === 0;
+
+        const referenceRow = subjectRows[0] || {};
+        const exchangeDate =
+          exchangeDateMap[
           getExchangeDateIdKey({
-            responsibilityType: first.RESPONSIBILITY_TYPE_ID,
-            targetClass: first.CLASS_ID,
-            targetSubject: first.SUBJECT_ID,
+            responsibilityType: referenceRow.RESPONSIBILITY_TYPE_ID,
+            targetClass: referenceRow.CLASS_ID,
+            targetSubject: referenceRow.SUBJECT_ID,
           })
-        ] ||
-        exchangeDateMap[getExchangeDateKey(className, subjectName)] ||
-        lastDateOfExchange;
-      body.push([
-        subjectName,
-        first.TEACHER?.toUpperCase?.() || first.TEACHER || "",
-        first.CAMPUS || "",
-        "",
-        formatExchangeDate(exchangeDate),
-        second.TEACHER?.toUpperCase?.() || second.TEACHER || "",
-        second.CAMPUS || "",
-        "",
-      ]);
+          ] ||
+          exchangeDateMap[getExchangeDateKey(className, subjectName)] ||
+          lastDateOfExchange;
+
+        const rowSpan = Math.ceil(subjectRows.length / 2);
+        let rowArray;
+
+        if (isFirstRow) {
+          rowArray = [
+            { content: subjectName, rowSpan, styles: { valign: "middle" } },
+            first.TEACHER?.toUpperCase?.() || first.TEACHER || "",
+            first.CAMPUS || "",
+            "",
+            formatExchangeDate(exchangeDate),
+            second.TEACHER?.toUpperCase?.() || second.TEACHER || "",
+            second.CAMPUS || "",
+            "",
+          ];
+        } else {
+          rowArray = [
+            first.TEACHER?.toUpperCase?.() || first.TEACHER || "",
+            first.CAMPUS || "",
+            "",
+            "",
+            second.TEACHER?.toUpperCase?.() || second.TEACHER || "",
+            second.CAMPUS || "",
+            "",
+          ];
+        }
+        
+        rowArray._subjectName = subjectName;
+        body.push(rowArray);
+      }
     });
 
     sections.push({ className, body });
@@ -402,6 +499,8 @@ const buildExaminerReportBody = ({
 
   return sections;
 };
+
+const EXAMINER_TABLE_COLUMN_WIDTHS = [58, 92, 54, 46, 68, 92, 54, 46];
 
 const drawExaminerClassWiseReport = ({
   doc,
@@ -419,13 +518,11 @@ const drawExaminerClassWiseReport = ({
     exchangeDateMap,
   });
 
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(14);
-  doc.text("List of Examiner & Scrutinizer", pageWidth / 2, 34, {
-    align: "center",
+  const contentStartY = drawProfessionalReportHeader(doc, {
+    title: "List of Examiner & Scrutinizer",
+    subtitle: examName,
+    y: 40,
   });
-  doc.setFontSize(11);
-  doc.text(examName, pageWidth / 2, 50, { align: "center" });
 
   const renderExaminerTable = ({
     startY,
@@ -441,44 +538,53 @@ const drawExaminerClassWiseReport = ({
         [
           "Subject",
           firstPersonLabel,
-          "Campus / Shift",
+          "Campus /\nShift",
           "Signature",
-          "Last Date of Exchange",
+          "Last Date of\nExchange",
           secondPersonLabel,
-          "Campus / Shift",
+          "Campus /\nShift",
           "Signature",
         ],
       ],
       body: rows,
       theme: "grid",
       tableWidth: pageWidth - 80,
-      styles: {
-        fontSize: 7.5,
+      styles: getUniformTableStyles({
+        fontSize: 9,
         textColor: [15, 23, 42],
         lineColor: [71, 85, 105],
         lineWidth: 0.4,
-        overflow: "linebreak",
-        cellPadding: 3,
-        valign: "middle",
-      },
-      headStyles: {
+      }),
+      bodyStyles: getUniformBodyStyles(),
+      headStyles: withUniformHeadStyles({
         fillColor: [255, 255, 255],
         textColor: [15, 23, 42],
         lineColor: [71, 85, 105],
         lineWidth: 0.5,
         fontStyle: "bold",
-      },
+        fontSize: 8.5,
+      }),
       columnStyles: {
-        0: { cellWidth: 60 },
-        1: { cellWidth: 78 },
-        2: { cellWidth: 56 },
-        3: { cellWidth: 48 },
-        4: { cellWidth: 72, halign: "left" },
-        5: { cellWidth: 78 },
-        6: { cellWidth: 56 },
-        7: { cellWidth: 48 },
+        0: { cellWidth: EXAMINER_TABLE_COLUMN_WIDTHS[0], fontSize: 8.5 },
+        1: { cellWidth: EXAMINER_TABLE_COLUMN_WIDTHS[1] },
+        2: { cellWidth: EXAMINER_TABLE_COLUMN_WIDTHS[2], fontSize: 8.5 },
+        3: { cellWidth: EXAMINER_TABLE_COLUMN_WIDTHS[3] },
+        4: {
+          cellWidth: EXAMINER_TABLE_COLUMN_WIDTHS[4],
+          halign: "left",
+        },
+        5: { cellWidth: EXAMINER_TABLE_COLUMN_WIDTHS[5] },
+        6: { cellWidth: EXAMINER_TABLE_COLUMN_WIDTHS[6], fontSize: 8.5 },
+        7: { cellWidth: EXAMINER_TABLE_COLUMN_WIDTHS[7] },
       },
-      margin: { left: 40, right: 40, bottom: 46 },
+      margin: { top: 48, left: 40, right: 40, bottom: 46 },
+      didParseCell: createUniformRowDidParseCell(doc, {
+        fontSize: 9,
+        columnWidths: EXAMINER_TABLE_COLUMN_WIDTHS,
+        columnMaxLines: { 1: 2, 2: 2, 4: 2, 5: 2, 6: 2 },
+        fitHead: true,
+        maxLines: 2,
+      }),
       didDrawPage: (data) => {
         drawReportFooter(doc, data.pageNumber);
       },
@@ -487,7 +593,7 @@ const drawExaminerClassWiseReport = ({
     return (doc.lastAutoTable?.finalY || startY) + 12;
   };
 
-  let startY = 74;
+  let startY = contentStartY + 6;
   sections.forEach((section, index) => {
     if (index > 0 && startY > 640) {
       doc.addPage();
@@ -501,10 +607,10 @@ const drawExaminerClassWiseReport = ({
 
     if (isSeniorExaminerClass(section.className)) {
       const examinerRows = section.body.filter(
-        (row) => !isSeniorScrutinizerSubject(row[0])
+        (row) => !isSeniorScrutinizerSubject(row._subjectName)
       );
       const scrutinizerRows = section.body.filter((row) =>
-        isSeniorScrutinizerSubject(row[0])
+        isSeniorScrutinizerSubject(row._subjectName)
       );
 
       startY = renderExaminerTable({
@@ -583,7 +689,7 @@ const getDetailedReportHeaderLine = async ({ reportType, branchId, classId }) =>
     mongoose.Types.ObjectId.isValid(branchId)
   ) {
     const branch = await Branch.findById(branchId).select("name").lean();
-    return branch?.name ? `Branch/Shift: ${branch.name}` : "";
+    return branch?.name ? `Campus/Shift: ${branch.name}` : "";
   }
 
   if (
@@ -605,6 +711,7 @@ const getReportData = async (req, res) => {
   try {
     const {
       year,
+      years,
       typeId,
       typeIds,
       classId,
@@ -613,6 +720,7 @@ const getReportData = async (req, res) => {
       reportType,
       branchId,
       subjectId,
+      subjectIds,
     } = req.query;
 
     if (reportType === "INACTIVE_NO_ROUTINE") {
@@ -693,15 +801,19 @@ const getReportData = async (req, res) => {
     if (reportType === "UNASSIGNED_TEACHERS") {
       const selectedTypeIds = parseObjectIdList(typeIds || typeId);
       const selectedClassIds = parseObjectIdList(classIds || classId);
+      const selectedYears = parseYearList(years || year);
 
-      if (!year || selectedTypeIds.length === 0) {
+      if (
+        selectedYears.length === 0 ||
+        selectedTypeIds.length === 0 ||
+        selectedClassIds.length === 0
+      ) {
         return res.status(400).json({
           message:
-            "Year and at least one duty type are required for unassigned report.",
+            "At least one year, one duty type, and one class are required for unassigned report.",
         });
       }
 
-      const selectedYear = parseInt(year, 10);
       const selectedTypes = await ResponsibilityType.find({
         _id: { $in: selectedTypeIds },
       })
@@ -726,163 +838,264 @@ const getReportData = async (req, res) => {
         teacherMatch.campus = new mongoose.Types.ObjectId(branchId);
       }
 
-      const routineLookupPipeline = [
-        {
-          $match: {
-            $expr: { $eq: ["$teacher", "$$teacherId"] },
-          },
-        },
-        { $unwind: "$years" },
-        { $match: { "years.year": selectedYear } },
-        { $unwind: "$years.assignments" },
-      ];
+      // Candidates: teachers with routine in selected classes in ANY selected year.
+      // A year with no data is treated as unassigned.
+      // Keep only teachers who are unassigned in EVERY selected year (AND).
+      const selectedClassIdSet = new Set(
+        selectedClassIds.map((id) => String(id))
+      );
+      const assignedByYear = new Map(
+        selectedYears.map((selectedYear) => [selectedYear, new Set()])
+      );
+      const candidateTeachers = new Map();
 
-      if (selectedClassIds.length > 0) {
-        routineLookupPipeline.push({
-          $match: {
-            "years.assignments.className": { $in: selectedClassIds },
+      for (const selectedYear of selectedYears) {
+        const routineLookupPipeline = [
+          {
+            $match: {
+              $expr: { $eq: ["$teacher", "$$teacherId"] },
+            },
           },
+          { $unwind: "$years" },
+          { $match: { "years.year": selectedYear } },
+          { $unwind: "$years.assignments" },
+          {
+            $match: {
+              "years.assignments.className": { $in: selectedClassIds },
+            },
+          },
+          {
+            $group: {
+              _id: "$teacher",
+              classIds: { $addToSet: "$years.assignments.className" },
+            },
+          },
+        ];
+
+        const pipeline = [
+          { $match: teacherMatch },
+          {
+            $lookup: {
+              from: "routines",
+              let: { teacherId: "$_id" },
+              pipeline: routineLookupPipeline,
+              as: "activeRoutine",
+            },
+          },
+          { $match: { "activeRoutine.0": { $exists: true } } },
+          {
+            $addFields: {
+              routineClassIds: {
+                $ifNull: [{ $arrayElemAt: ["$activeRoutine.classIds", 0] }, []],
+              },
+            },
+          },
+          {
+            $lookup: {
+              from: "classes",
+              localField: "routineClassIds",
+              foreignField: "_id",
+              as: "routineClassDetails",
+            },
+          },
+          {
+            $lookup: {
+              from: "responsibilityassignments",
+              let: {
+                teacherId: "$_id",
+              },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ["$teacher", "$$teacherId"] },
+                        { $eq: ["$year", selectedYear] },
+                        { $in: ["$responsibilityType", selectedTypeIds] },
+                        { $ne: ["$status", "Cancelled"] },
+                      ],
+                    },
+                  },
+                },
+                {
+                  $project: {
+                    _id: 0,
+                    responsibilityType: 1,
+                    targetClass: 1,
+                  },
+                },
+              ],
+              as: "matchingAssignments",
+            },
+          },
+          {
+            $lookup: {
+              from: "branches",
+              localField: "campus",
+              foreignField: "_id",
+              as: "campusDetails",
+            },
+          },
+          {
+            $unwind: {
+              path: "$campusDetails",
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              teacherKey: { $toString: "$_id" },
+              TEACHERID: "$teacherId",
+              TEACHER: "$name",
+              CAMPUS: { $ifNull: ["$campusDetails.name", "N/A"] },
+              routineClasses: {
+                $map: {
+                  input: "$routineClassDetails",
+                  as: "class",
+                  in: {
+                    id: { $toString: "$$class._id" },
+                    name: "$$class.name",
+                  },
+                },
+              },
+              matchingAssignments: {
+                $map: {
+                  input: "$matchingAssignments",
+                  as: "assignment",
+                  in: {
+                    responsibilityType: {
+                      $toString: "$$assignment.responsibilityType",
+                    },
+                    targetClass: {
+                      $cond: [
+                        { $ifNull: ["$$assignment.targetClass", false] },
+                        { $toString: "$$assignment.targetClass" },
+                        null,
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        ];
+
+        const data = await Teacher.aggregate(pipeline).allowDiskUse(true);
+        const yearAssigned = assignedByYear.get(selectedYear);
+
+        data.forEach((item) => {
+          const routineClasses = (item.routineClasses || []).filter(
+            (routineClass) => selectedClassIdSet.has(routineClass.id)
+          );
+          if (routineClasses.length === 0) return;
+
+          const existing = candidateTeachers.get(item.teacherKey) || {
+            TEACHERID: item.TEACHERID,
+            TEACHER: item.TEACHER,
+            CAMPUS: item.CAMPUS,
+            classNames: new Set(),
+          };
+          routineClasses.forEach((routineClass) =>
+            existing.classNames.add(routineClass.name)
+          );
+          candidateTeachers.set(item.teacherKey, existing);
+
+          const assignments = item.matchingAssignments || [];
+          const isAssignedThisYear = selectedTypeMeta.some((type) => {
+            if (!type.requiresClassSubject) {
+              return assignments.some(
+                (assignment) => assignment.responsibilityType === type.id
+              );
+            }
+
+            return assignments.some(
+              (assignment) =>
+                assignment.responsibilityType === type.id &&
+                assignment.targetClass &&
+                selectedClassIdSet.has(assignment.targetClass)
+            );
+          });
+
+          if (isAssignedThisYear) {
+            yearAssigned.add(item.teacherKey);
+          }
         });
       }
 
-      routineLookupPipeline.push({
-        $group: {
-          _id: "$teacher",
-          classIds: { $addToSet: "$years.assignments.className" },
-        },
+      // Also mark teachers assigned in a year even if they have no routine that year
+      // (assignment alone counts as assigned data for that year).
+      const assignmentOnlyRows = await ResponsibilityAssignment.find({
+        year: { $in: selectedYears },
+        responsibilityType: { $in: selectedTypeIds },
+        status: { $ne: "Cancelled" },
+        $or: [
+          { targetClass: { $in: selectedClassIds } },
+          { targetClass: null },
+          { targetClass: { $exists: false } },
+        ],
+      })
+        .select("teacher year responsibilityType targetClass")
+        .lean();
+
+      const classRequiredTypeIds = new Set(
+        selectedTypeMeta
+          .filter((type) => type.requiresClassSubject)
+          .map((type) => type.id)
+      );
+      const nonClassTypeIds = new Set(
+        selectedTypeMeta
+          .filter((type) => !type.requiresClassSubject)
+          .map((type) => type.id)
+      );
+
+      assignmentOnlyRows.forEach((assignment) => {
+        const teacherKey = String(assignment.teacher);
+        const typeId = String(assignment.responsibilityType);
+        const targetClassId = assignment.targetClass
+          ? String(assignment.targetClass)
+          : null;
+        const yearAssigned = assignedByYear.get(assignment.year);
+        if (!yearAssigned) return;
+
+        const matchesClassDuty =
+          classRequiredTypeIds.has(typeId) &&
+          targetClassId &&
+          selectedClassIdSet.has(targetClassId);
+        const matchesNonClassDuty = nonClassTypeIds.has(typeId);
+
+        if (matchesClassDuty || matchesNonClassDuty) {
+          yearAssigned.add(teacherKey);
+        }
       });
 
-      const pipeline = [
-        { $match: teacherMatch },
-        {
-          $lookup: {
-            from: "routines",
-            let: { teacherId: "$_id" },
-            pipeline: routineLookupPipeline,
-            as: "activeRoutine",
-          },
-        },
-        { $match: { "activeRoutine.0": { $exists: true } } },
-        {
-          $addFields: {
-            routineClassIds: {
-              $ifNull: [{ $arrayElemAt: ["$activeRoutine.classIds", 0] }, []],
-            },
-          },
-        },
-        {
-          $lookup: {
-            from: "classes",
-            localField: "routineClassIds",
-            foreignField: "_id",
-            as: "routineClassDetails",
-          },
-        },
-        {
-          $lookup: {
-            from: "responsibilityassignments",
-            let: {
-              teacherId: "$_id",
-            },
-            pipeline: [
-              {
-                $match: {
-                  $expr: {
-                    $and: [
-                      { $eq: ["$teacher", "$$teacherId"] },
-                      { $eq: ["$year", selectedYear] },
-                      { $in: ["$responsibilityType", selectedTypeIds] },
-                      { $ne: ["$status", "Cancelled"] },
-                    ],
-                  },
-                },
-              },
-              {
-                $project: {
-                  _id: 0,
-                  responsibilityType: 1,
-                  targetClass: 1,
-                },
-              },
-            ],
-            as: "matchingAssignments",
-          },
-        },
-        {
-          $lookup: {
-            from: "branches",
-            localField: "campus",
-            foreignField: "_id",
-            as: "campusDetails",
-          },
-        },
-        {
-          $unwind: { path: "$campusDetails", preserveNullAndEmptyArrays: true },
-        },
-        {
-          $project: {
-            _id: 0,
-            teacherObjectId: "$_id",
-            ID: { $literal: 0 },
-            TEACHERID: "$teacherId",
-            TEACHER: "$name",
-            CAMPUS: { $ifNull: ["$campusDetails.name", "N/A"] },
-            YEAR: { $literal: selectedYear },
-            routineClasses: {
-              $map: {
-                input: "$routineClassDetails",
-                as: "class",
-                in: {
-                  id: { $toString: "$$class._id" },
-                  name: "$$class.name",
-                },
-              },
-            },
-            matchingAssignments: {
-              $map: {
-                input: "$matchingAssignments",
-                as: "assignment",
-                in: {
-                  responsibilityType: {
-                    $toString: "$$assignment.responsibilityType",
-                  },
-                  targetClass: {
-                    $cond: [
-                      { $ifNull: ["$$assignment.targetClass", false] },
-                      { $toString: "$$assignment.targetClass" },
-                      null,
-                    ],
-                  },
-                },
-              },
-            },
-          },
-        },
-        { $sort: { CAMPUS: 1, TEACHER: 1 } },
-      ];
+      const yearLabel = selectedYears.join(", ");
+      const missingDutiesLabel = selectedTypeMeta
+        .map((type) => type.name)
+        .sort((a, b) => a.localeCompare(b))
+        .join(", ");
 
-      const data = await Teacher.aggregate(pipeline).allowDiskUse(true);
-      const formatted = data
-        .flatMap((item) => {
-          const routineClasses = item.routineClasses || [];
-          const assignments = item.matchingAssignments || [];
-          const hasAnySelectedDutyAssignment = assignments.some((assignment) =>
-            selectedTypeMeta.some((type) => assignment.responsibilityType === type.id)
-          );
+      const mergedRows = [];
+      candidateTeachers.forEach((teacherRow, teacherKey) => {
+        // Missing year data => unassigned for that year.
+        const isUnassignedInAllYears = selectedYears.every(
+          (selectedYear) => !assignedByYear.get(selectedYear).has(teacherKey)
+        );
+        if (!isUnassignedInAllYears) return;
 
-          if (hasAnySelectedDutyAssignment) return [];
+        mergedRows.push({
+          TEACHERID: teacherRow.TEACHERID,
+          TEACHER: teacherRow.TEACHER,
+          CAMPUS: teacherRow.CAMPUS,
+          YEAR: yearLabel,
+          CLASSES: [...teacherRow.classNames]
+            .sort((a, b) => a.localeCompare(b))
+            .join(", "),
+          MISSING_DUTIES: missingDutiesLabel,
+        });
+      });
 
-          return [
-            {
-              TEACHERID: item.TEACHERID,
-              TEACHER: item.TEACHER,
-              CAMPUS: item.CAMPUS,
-              YEAR: item.YEAR,
-              CLASSES: routineClasses.map((routineClass) => routineClass.name).join(", "),
-              MISSING_DUTIES: selectedTypeMeta.map((type) => type.name).join(", "),
-            },
-          ];
-        })
+      const formatted = mergedRows
         .sort((first, second) => {
           const campusCompare = (first.CAMPUS || "").localeCompare(
             second.CAMPUS || ""
@@ -899,6 +1112,149 @@ const getReportData = async (req, res) => {
       return res.json(formatted);
     }
 
+    if (reportType === "SUBJECT_WISE_TEACHERS") {
+      const selectedSubjectIds = parseObjectIdList(subjectIds || subjectId);
+      const selectedTypeIds = parseObjectIdList(typeIds || typeId);
+
+      if (!year || selectedSubjectIds.length === 0) {
+        return res.status(400).json({
+          message:
+            "Year and at least one subject are required for subject-wise teacher report.",
+        });
+      }
+
+      const selectedYear = parseInt(year, 10);
+      const match = {
+        year: selectedYear,
+        targetSubject: { $in: selectedSubjectIds },
+        status: status || "Assigned",
+      };
+
+      if (selectedTypeIds.length > 0) {
+        match.responsibilityType = { $in: selectedTypeIds };
+      }
+
+      if (classId && mongoose.Types.ObjectId.isValid(classId)) {
+        match.targetClass = new mongoose.Types.ObjectId(classId);
+      }
+
+      const pipeline = [
+        { $match: match },
+        {
+          $lookup: {
+            from: "teachers",
+            localField: "teacher",
+            foreignField: "_id",
+            as: "teacherDetails",
+          },
+        },
+        {
+          $unwind: { path: "$teacherDetails", preserveNullAndEmptyArrays: true },
+        },
+      ];
+
+      if (branchId && mongoose.Types.ObjectId.isValid(branchId)) {
+        const branchObjectId = new mongoose.Types.ObjectId(branchId);
+        pipeline.push({
+          $match: {
+            $or: [
+              { teacherCampus: branchObjectId },
+              { "teacherDetails.campus": branchObjectId },
+            ],
+          },
+        });
+      }
+
+      pipeline.push(
+        {
+          $addFields: {
+            effectiveCampus: {
+              $ifNull: ["$teacherCampus", "$teacherDetails.campus"],
+            },
+          },
+        },
+        {
+          $lookup: {
+            from: "branches",
+            localField: "effectiveCampus",
+            foreignField: "_id",
+            as: "branchDetails",
+          },
+        },
+        {
+          $unwind: { path: "$branchDetails", preserveNullAndEmptyArrays: true },
+        },
+        {
+          $lookup: {
+            from: "responsibilitytypes",
+            localField: "responsibilityType",
+            foreignField: "_id",
+            as: "typeDetails",
+          },
+        },
+        { $unwind: { path: "$typeDetails", preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: "classes",
+            localField: "targetClass",
+            foreignField: "_id",
+            as: "classDetails",
+          },
+        },
+        {
+          $unwind: { path: "$classDetails", preserveNullAndEmptyArrays: true },
+        },
+        {
+          $lookup: {
+            from: "subjects",
+            localField: "targetSubject",
+            foreignField: "_id",
+            as: "subjectDetails",
+          },
+        },
+        {
+          $unwind: { path: "$subjectDetails", preserveNullAndEmptyArrays: true },
+        },
+        {
+          $project: {
+            _id: 0,
+            ID: { $literal: 0 },
+            SUBJECT: { $ifNull: ["$subjectDetails.name", "N/A"] },
+            CLASS: { $ifNull: ["$classDetails.name", "N/A"] },
+            CLASS_LEVEL: { $ifNull: ["$classDetails.level", 999] },
+            RESPONSIBILITY_TYPE: { $ifNull: ["$typeDetails.name", "N/A"] },
+            TEACHER: { $ifNull: ["$teacherDetails.name", "N/A"] },
+            TEACHERID: { $ifNull: ["$teacherDetails.teacherId", "N/A"] },
+            PHONE: { $ifNull: ["$teacherDetails.phone", "N/A"] },
+            CAMPUS: { $ifNull: ["$branchDetails.name", "N/A"] },
+            YEAR: { $literal: selectedYear },
+          },
+        },
+        {
+          $sort: {
+            CLASS_LEVEL: 1,
+            CLASS: 1,
+            SUBJECT: 1,
+            RESPONSIBILITY_TYPE: 1,
+            TEACHER: 1,
+          },
+        }
+      );
+
+      const data = await ResponsibilityAssignment.aggregate(pipeline).allowDiskUse(
+        true
+      );
+      const formatted = data.map((item, idx) => {
+        const { CLASS_LEVEL, ...row } = item;
+        return {
+          ...row,
+          ID: idx + 1,
+          PHONE: formatPhoneWithLeadingZero(item.PHONE),
+        };
+      });
+      return res.json(formatted);
+    }
+
     const filter = {};
     if (year) filter.year = parseInt(year, 10);
     const selectedTypeIds = parseObjectIdList(typeIds);
@@ -910,7 +1266,10 @@ const getReportData = async (req, res) => {
     if (classId && mongoose.Types.ObjectId.isValid(classId)) {
       filter.targetClass = new mongoose.Types.ObjectId(classId);
     }
-    if (subjectId && mongoose.Types.ObjectId.isValid(subjectId)) {
+    const selectedSubjectIds = parseObjectIdList(subjectIds);
+    if (selectedSubjectIds.length > 0) {
+      filter.targetSubject = { $in: selectedSubjectIds };
+    } else if (subjectId && mongoose.Types.ObjectId.isValid(subjectId)) {
       filter.targetSubject = new mongoose.Types.ObjectId(subjectId);
     }
 
@@ -1093,7 +1452,9 @@ const getReportData = async (req, res) => {
       const data = await ResponsibilityAssignment.aggregate(
         pipeline
       ).allowDiskUse(true);
-      const formatted = data.map((item, idx) => ({ ...item, ID: idx + 1 }));
+      const formatted = data
+        .sort(compareAssignmentReportRows)
+        .map((item, idx) => ({ ...item, ID: idx + 1 }));
       return res.json(formatted);
     } else {
       const assignments = await ResponsibilityAssignment.find(filter)
@@ -1118,7 +1479,9 @@ const getReportData = async (req, res) => {
         STATUS: a.status,
         _ID: a._id,
         TEACHERID: a.teacher?.teacherId || "N/A",
-      }));
+      }))
+        .sort(compareAssignmentReportRows)
+        .map((item, idx) => ({ ...item, ID: idx + 1 }));
       return res.json(formatted);
     }
   } catch (error) {
@@ -1255,15 +1618,15 @@ const fetchYearlyReportData = async (
       },
       ...(branchObjectId
         ? [
-            {
-              $match: {
-                $or: [
-                  { teacherCampus: branchObjectId },
-                  { "teacherDetails.campus": branchObjectId },
-                ],
-              },
+          {
+            $match: {
+              $or: [
+                { teacherCampus: branchObjectId },
+                { "teacherDetails.campus": branchObjectId },
+              ],
             },
-          ]
+          },
+        ]
         : []),
       {
         $lookup: {
@@ -1368,8 +1731,8 @@ const fetchYearlyReportData = async (
       );
     const campuses = branchIds.length
       ? await BranchModel.find({ _id: { $in: branchIds } })
-          .select("name")
-          .lean()
+        .select("name")
+        .lean()
       : [];
     const campusMap = new Map(campuses.map((c) => [c._id.toString(), c.name]));
 
@@ -1400,10 +1763,17 @@ const exportCampusWiseYearlyPDF = async (req, res) => {
   const previousYear = currentYear - 1;
   const isComparing = includePrevious === "true";
 
-  // 🚀 DYNAMIC COLUMNS: Use selected types from frontend or fallback to global RESPONSIBILITY_TYPES
   const ACTIVE_TYPES = selectedTypes
     ? selectedTypes.split(",")
-    : RESPONSIBILITY_TYPES;
+    : [...RESPONSIBILITY_TYPES];
+
+  ACTIVE_TYPES.sort((a, b) => {
+    let indexA = RESPONSIBILITY_TYPES.indexOf(a);
+    let indexB = RESPONSIBILITY_TYPES.indexOf(b);
+    if (indexA === -1) indexA = 999;
+    if (indexB === -1) indexB = 999;
+    return indexA - indexB;
+  });
 
   try {
     // 1. Fetch the data using aggregation
@@ -1488,7 +1858,7 @@ const exportCampusWiseYearlyPDF = async (req, res) => {
     }
 
     // Dynamic Header Array
-    const head = [["Sl", "Campus", "Teacher's Name", "Year", ...ACTIVE_TYPES]];
+    const head = [["Sl", "Shift", "Teacher's Name", "Year", ...ACTIVE_TYPES]];
 
     const body = flatReport.map((r) => [
       r.SL,
@@ -1503,61 +1873,67 @@ const exportCampusWiseYearlyPDF = async (req, res) => {
     const pageWidth = doc.internal.pageSize.getWidth();
 
     // --- Header Section ---
-    doc.setFontSize(16);
-    doc.setFont("helvetica", "bold");
-    doc.text(questionMeta.title || "Yearly Responsibility Report", pageWidth / 2, 30, {
-      align: "center",
+    const headerStartY = drawProfessionalReportHeader(doc, {
+      title: questionMeta.title || "Yearly Responsibility Report",
+      subtitleLines: [
+        `Campus: ${displayCampus}`,
+        `Academic Year: ${displayYear}`,
+      ],
+      y: 40,
     });
 
-    doc.setFontSize(11);
-    doc.setFont("helvetica", "normal");
-    doc.text(`Campus: ${displayCampus}`, pageWidth / 2, 45, {
-      align: "center",
-    });
-    doc.text(`Academic Year: ${displayYear}`, pageWidth / 2, 60, {
-      align: "center",
-    });
+    const yearlyFontSize = ACTIVE_TYPES.length > 8 ? 6 : 7.5;
+    const yearlyColumnWidths = {
+      0: 28,
+      1: 70,
+      2: 100,
+      3: 35,
+    };
 
     // 5. Render Table
     doc.autoTable({
-      startY: 75,
+      startY: headerStartY + 4,
       head,
       body,
       theme: "grid",
-      // 🚀 FONT ADJUSTMENT: Shrink font if many columns are selected to prevent overlap
-      styles: {
-        fontSize: ACTIVE_TYPES.length > 8 ? 6 : 7.5,
+      tableWidth: pageWidth - 80,
+      styles: getUniformTableStyles({
+        fontSize: yearlyFontSize,
         textColor: [15, 23, 42],
         lineColor: [71, 85, 105],
         lineWidth: 0.4,
-        valign: "middle",
-        overflow: "linebreak",
-      },
-      headStyles: {
+      }),
+      bodyStyles: getUniformBodyStyles(),
+      headStyles: withUniformHeadStyles({
         fillColor: [245, 205, 121],
         textColor: 20,
         lineColor: [71, 85, 105],
         lineWidth: 0.5,
         fontStyle: "bold",
         halign: "center",
-      },
+      }),
       columnStyles: {
-        0: { cellWidth: 28, halign: "center" },
-        1: { cellWidth: 70 },
-        2: { cellWidth: 100 },
-        3: { cellWidth: 35, halign: "center" },
+        0: { cellWidth: yearlyColumnWidths[0], halign: "center" },
+        1: { cellWidth: yearlyColumnWidths[1] },
+        2: { cellWidth: yearlyColumnWidths[2] },
+        3: { cellWidth: yearlyColumnWidths[3], halign: "center" },
       },
-      didParseCell: function (data) {
-        if (data.section === "body" && isComparing) {
-          if (data.row.index % 2 === 0 && data.column.index <= 2) {
-            data.cell.rowSpan = 2;
+      didParseCell: createUniformRowDidParseCell(doc, {
+        fontSize: yearlyFontSize,
+        columnWidths: yearlyColumnWidths,
+        columnMaxLines: { 2: 2 },
+        beforeParse: (data) => {
+          if (data.section === "body" && isComparing) {
+            if (data.row.index % 2 === 0 && data.column.index <= 2) {
+              data.cell.rowSpan = 2;
+            }
           }
-        }
-      },
+        },
+      }),
       didDrawPage: (data) => {
         drawReportFooter(doc, data.pageNumber);
       },
-      margin: { bottom: 46 },
+      margin: { top: 48, left: 40, right: 40, bottom: 46 },
     });
     drawSubmissionMessage(doc, questionMeta.submissionMessage);
 
@@ -1596,11 +1972,11 @@ const exportCustomReportToPDF = async (req, res) => {
     const selectedClassIds = parseObjectIdList(classIds || classId);
     const selectedTypeDetails = selectedTypeIds.length
       ? (
-          await ResponsibilityType.find({ _id: { $in: selectedTypeIds } })
-            .select("name submissionDeadline")
-            .sort({ name: 1 })
-            .lean()
-        )
+        await ResponsibilityType.find({ _id: { $in: selectedTypeIds } })
+          .select("name submissionDeadline")
+          .sort({ name: 1 })
+          .lean()
+      )
       : [];
     const selectedTypeNames = selectedTypeDetails.map((type) => type.name);
     const responsibilityName = selectedTypeNames.length
@@ -1612,13 +1988,13 @@ const exportCustomReportToPDF = async (req, res) => {
     if (reportType === "UNASSIGNED_TEACHERS") {
       const selectedClassDetails = selectedClassIds.length
         ? await Class.find({ _id: { $in: selectedClassIds } })
-            .select("name")
-            .sort({ level: 1, name: 1 })
-            .lean()
+          .select("name")
+          .sort({ level: 1, name: 1 })
+          .lean()
         : [];
       const classLabel = selectedClassDetails.length
         ? selectedClassDetails.map((item) => item.name).join(", ")
-        : "All routine classes";
+        : "Selected classes";
       const pseudoReq = {
         user: req.user,
         query: {
@@ -1632,17 +2008,12 @@ const exportCustomReportToPDF = async (req, res) => {
           rawData = data;
         },
         status: () => pseudoRes,
-        send: () => {},
+        send: () => { },
       };
       await getReportData(pseudoReq, pseudoRes);
 
       const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "p" });
       const pageWidth = doc.internal.pageSize.getWidth();
-      doc.setFontSize(14);
-      doc.text("Unassigned Teachers Report", pageWidth / 2, 36, {
-        align: "center",
-      });
-      doc.setFontSize(10);
       const reportTypes = [
         ...new Set(
           rawData
@@ -1651,23 +2022,22 @@ const exportCustomReportToPDF = async (req, res) => {
             .filter(Boolean)
         ),
       ];
-      doc.text(
-        `Year: ${year} | Type: ${
+      const yearLabel = parseYearList(req.query.years || year).join(", ") || year;
+      const headerStartY = drawProfessionalReportHeader(doc, {
+        title: "Unassigned Teachers Report",
+        subtitle: `Year(s): ${yearLabel} | Type: ${
           reportTypes.length ? reportTypes.join(", ") : responsibilityName
         } | Class: ${classLabel}`,
-        pageWidth / 2,
-        52,
-        { align: "center" }
-      );
+      });
 
       doc.autoTable({
-        startY: 70,
+        startY: headerStartY + 4,
         head: [
           [
             "S.L.",
             "Teacher ID",
             "Teacher",
-            "Campus",
+            "Shift",
             "Year",
             "Class",
             "Missing Duties",
@@ -1683,22 +2053,377 @@ const exportCustomReportToPDF = async (req, res) => {
           item.MISSING_DUTIES,
         ]),
         theme: "grid",
-        headStyles: {
+        headStyles: withUniformHeadStyles({
           fillColor: [30, 58, 138],
           textColor: 255,
           lineColor: [71, 85, 105],
           lineWidth: 0.5,
-        },
-        styles: {
+        }),
+        styles: getUniformTableStyles({
           fontSize: 8,
-          overflow: "linebreak",
           textColor: [15, 23, 42],
           lineColor: [71, 85, 105],
           lineWidth: 0.4,
+        }),
+        bodyStyles: getUniformBodyStyles(),
+        columnStyles: {
+          0: { cellWidth: 28, halign: "center" },
+          1: { cellWidth: 62 },
+          2: { cellWidth: 130 },
+          3: { cellWidth: 72 },
+          4: { cellWidth: 38, halign: "center" },
+          5: { cellWidth: 55 },
+          6: { cellWidth: 130 },
         },
+        didParseCell: createUniformRowDidParseCell(doc, {
+          fontSize: 8,
+          columnMaxLines: { 2: 2 },
+          columnWidths: {
+            0: 28,
+            1: 62,
+            2: 130,
+            3: 72,
+            4: 38,
+            5: 55,
+            6: 130,
+          },
+        }),
         margin: { bottom: 46 },
         didDrawPage: (data) => {
           drawReportFooter(doc, data.pageNumber);
+        },
+      });
+
+      res.setHeader("Content-Type", "application/pdf");
+      return res.send(Buffer.from(doc.output("arraybuffer")));
+    }
+
+    if (reportType === "SUBJECT_WISE_TEACHERS") {
+      const selectedSubjectIds = parseObjectIdList(
+        req.query.subjectIds || req.query.subjectId
+      );
+      if (!selectedSubjectIds.length) {
+        return res.status(400).json({
+          message: "Select at least one subject before exporting.",
+        });
+      }
+
+      const pseudoReq = {
+        user: req.user,
+        query: {
+          ...req.query,
+          reportType: "SUBJECT_WISE_TEACHERS",
+          subjectIds: selectedSubjectIds.map(String).join(","),
+        },
+      };
+      let rawData = [];
+      const pseudoRes = {
+        json: (data) => {
+          rawData = data;
+        },
+        status: () => pseudoRes,
+        send: () => {},
+      };
+      await getReportData(pseudoReq, pseudoRes);
+
+      const rows = Array.isArray(rawData) ? rawData : [];
+      const selectedSubjectDocs = await Subject.find({
+        _id: { $in: selectedSubjectIds },
+      })
+        .select("name")
+        .sort({ name: 1 })
+        .lean();
+
+      const subjectsForHeader =
+        selectedSubjectDocs.map((item) => item.name).join(", ") ||
+        [...new Set(rows.map((item) => item.SUBJECT).filter(Boolean))].join(
+          ", "
+        ) ||
+        "Selected subjects";
+
+      let campusLabel = "All campuses";
+      if (branchId && mongoose.Types.ObjectId.isValid(branchId)) {
+        const branch = await Branch.findById(branchId).select("name").lean();
+        if (branch?.name) campusLabel = branch.name;
+      }
+
+      const uniqueTeachers = new Set(
+        rows
+          .map((item) => item.TEACHERID || item.TEACHER)
+          .filter((value) => value && value !== "N/A")
+      );
+      const uniqueSubjects = new Set(
+        rows.map((item) => item.SUBJECT).filter(Boolean)
+      );
+      const classNamesSorted = [
+        ...new Set(rows.map((item) => item.CLASS).filter(Boolean)),
+      ].sort((a, b) => {
+        const aIdx = CLASS_ORDER.indexOf(normalizeReportLabel(a));
+        const bIdx = CLASS_ORDER.indexOf(normalizeReportLabel(b));
+        const aRank = aIdx === -1 ? 999 : aIdx;
+        const bRank = bIdx === -1 ? 999 : bIdx;
+        if (aRank !== bRank) return aRank - bRank;
+        return String(a).localeCompare(String(b));
+      });
+      const classesForHeader =
+        classNamesSorted.length > 0 ? classNamesSorted.join(", ") : "N/A";
+      const dutyTypesForHeader = responsibilityName || "All Duty Types";
+      const subjectsLabel = subjectsForHeader || "Selected subjects";
+      const teacherCount = uniqueTeachers.size;
+
+      const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "p" });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const marginX = 36;
+      const teal = BRAND.teal;
+      const slate = BRAND.navy;
+      const muted = BRAND.muted;
+      const line = BRAND.line;
+      const preparedBy = req.user?.name || "System User";
+      const usableWidth = pageWidth - marginX * 2;
+
+      const drawModernFooter = (pageNumber) => {
+        doc.setDrawColor(...line);
+        doc.setLineWidth(0.5);
+        doc.line(marginX, pageHeight - 36, pageWidth - marginX, pageHeight - 36);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(7.5);
+        doc.setTextColor(...muted);
+        doc.text(INSTITUTE_NAME, marginX, pageHeight - 22);
+        doc.text(`Page ${pageNumber}`, pageWidth - marginX, pageHeight - 22, {
+          align: "right",
+        });
+      };
+
+      const logoWidth = 44;
+      const logoHeight = 56;
+      const logoDrawn = drawInstituteLogo(doc, {
+        x: marginX,
+        y: 22,
+        width: logoWidth,
+        height: logoHeight,
+      });
+      const textX = logoDrawn ? marginX + logoWidth + 12 : marginX;
+      const titleMaxWidth = usableWidth - (logoDrawn ? logoWidth + 12 : 0) - 150;
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(14);
+      doc.setTextColor(...slate);
+      doc.text("Subject-wise Assigned Teachers", textX, 36, {
+        maxWidth: titleMaxWidth,
+      });
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(...BRAND.slate);
+      doc.text(
+        `Academic Year ${year}  ·  ${campusLabel}`,
+        textX,
+        50,
+        { maxWidth: titleMaxWidth }
+      );
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setTextColor(...slate);
+      doc.text("Duty Assignment Register", textX, 64, {
+        maxWidth: titleMaxWidth,
+      });
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7.5);
+      doc.setTextColor(...muted);
+      doc.text(`Generated: ${getReportGeneratedAt()}`, pageWidth - marginX, 38, {
+        align: "right",
+      });
+      doc.text(`Prepared by: ${preparedBy}`, pageWidth - marginX, 50, {
+        align: "right",
+      });
+
+      doc.setDrawColor(...teal);
+      doc.setLineWidth(1);
+      doc.line(marginX, 86, pageWidth - marginX, 86);
+
+      const filterY = 92;
+      const filterPadX = 10;
+      const filterInnerWidth = usableWidth - filterPadX * 2;
+      const colGap = 18;
+      const leftColW = filterInnerWidth * 0.48;
+      const rightColW = filterInnerWidth - leftColW - colGap;
+      const leftX = marginX + filterPadX;
+      const rightX = leftX + leftColW + colGap;
+
+      const buildFieldLines = (label, value, maxWidth) => {
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(7);
+        const labelW = doc.getTextWidth(`${label}: `);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(7.5);
+        const valueLines = doc.splitTextToSize(
+          String(value),
+          Math.max(24, maxWidth - labelW)
+        );
+        return { labelW, valueLines: valueLines.slice(0, 2) };
+      };
+
+      const subjectsField = buildFieldLines("Subjects", subjectsLabel, leftColW);
+      const dutyField = buildFieldLines(
+        "Duty Type(s)",
+        dutyTypesForHeader,
+        rightColW
+      );
+      const teacherField = buildFieldLines(
+        "Number of Teachers",
+        String(teacherCount),
+        leftColW
+      );
+      const classField = buildFieldLines("Classes", classesForHeader, rightColW);
+
+      const row1H =
+        Math.max(subjectsField.valueLines.length, dutyField.valueLines.length) *
+        10;
+      const row2H =
+        Math.max(teacherField.valueLines.length, classField.valueLines.length) *
+        10;
+      const filterHeight = 22 + row1H + 4 + row2H;
+
+      const drawField = (x, y, label, field) => {
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(7);
+        doc.setTextColor(...muted);
+        const labelText = `${label}: `;
+        doc.text(labelText, x, y);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(7.5);
+        doc.setTextColor(...slate);
+        doc.text(field.valueLines[0] || "", x + field.labelW, y);
+        if (field.valueLines.length > 1) {
+          doc.text(field.valueLines[1], x, y + 10);
+        }
+      };
+
+      doc.setFillColor(255, 255, 255);
+      doc.setDrawColor(...line);
+      doc.setLineWidth(0.5);
+      doc.roundedRect(marginX, filterY, usableWidth, filterHeight, 4, 4, "FD");
+      doc.setFillColor(...teal);
+      doc.rect(marginX, filterY, 3, filterHeight, "F");
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(6.5);
+      doc.setTextColor(...teal);
+      doc.text("FILTERED DATA", leftX, filterY + 10);
+
+      const row1Y = filterY + 21;
+      drawField(leftX, row1Y, "Subjects", subjectsField);
+      drawField(rightX, row1Y, "Duty Type(s)", dutyField);
+
+      const row2Y = row1Y + row1H + 4;
+      drawField(leftX, row2Y, "Number of Teachers", teacherField);
+      drawField(rightX, row2Y, "Classes", classField);
+
+      const subjectColumnWidths = {
+        0: 26,
+        1: 62,
+        2: 46,
+        3: 62,
+        4: 148,
+        5: 92,
+        6: 87,
+      };
+
+      doc.autoTable({
+        startY: filterY + filterHeight + 8,
+        head: [
+          [
+            "SL",
+            "Subject",
+            "Class",
+            "Duty Type",
+            "Teacher",
+            "Phone",
+            "Campus",
+          ],
+        ],
+        body: rows.length
+          ? rows.map((item, index) => [
+              index + 1,
+              item.SUBJECT || "N/A",
+              item.CLASS || "N/A",
+              item.RESPONSIBILITY_TYPE || "N/A",
+              item.TEACHER?.toUpperCase?.() || item.TEACHER || "N/A",
+              formatPhoneWithLeadingZero(item.PHONE),
+              item.CAMPUS || "N/A",
+            ])
+          : [
+              [
+                {
+                  content: "No assigned teachers found for the selected filters.",
+                  colSpan: 7,
+                  styles: {
+                    halign: "left",
+                    fontStyle: "bold",
+                    textColor: muted,
+                  },
+                },
+              ],
+            ],
+        theme: "grid",
+        tableWidth: usableWidth,
+        margin: { left: marginX, right: marginX, bottom: 48 },
+        headStyles: withUniformHeadStyles({
+          fillColor: teal,
+          textColor: 255,
+          fontStyle: "bold",
+          fontSize: 8,
+          halign: "left",
+          lineColor: teal,
+          lineWidth: 0.3,
+        }),
+        styles: getUniformTableStyles({
+          fontSize: 8,
+          cellPadding: { top: 5, right: 5, bottom: 5, left: 5 },
+          textColor: slate,
+          lineColor: line,
+          lineWidth: 0.35,
+          halign: "left",
+        }),
+        bodyStyles: {
+          ...getUniformBodyStyles(28),
+          halign: "left",
+        },
+        alternateRowStyles: {
+          fillColor: [248, 250, 252],
+        },
+        columnStyles: {
+          0: {
+            cellWidth: subjectColumnWidths[0],
+            halign: "left",
+            fontStyle: "bold",
+            textColor: teal,
+          },
+          1: { cellWidth: subjectColumnWidths[1], halign: "left" },
+          2: { cellWidth: subjectColumnWidths[2], halign: "left" },
+          3: { cellWidth: subjectColumnWidths[3], halign: "left" },
+          4: {
+            cellWidth: subjectColumnWidths[4],
+            fontStyle: "bold",
+            halign: "left",
+          },
+          5: { cellWidth: subjectColumnWidths[5], halign: "left" },
+          6: { cellWidth: subjectColumnWidths[6], halign: "left" },
+        },
+        didParseCell: createUniformRowDidParseCell(doc, {
+          rowHeight: 28,
+          fontSize: 8,
+          cellPadding: 5,
+          columnWidths: subjectColumnWidths,
+          columnMaxLines: { 1: 2, 3: 2, 4: 2, 5: 1, 6: 2 },
+          fitHead: true,
+          maxLines: 2,
+        }),
+        didDrawPage: (data) => {
+          drawModernFooter(data.pageNumber);
         },
       });
 
@@ -1720,27 +2445,25 @@ const exportCustomReportToPDF = async (req, res) => {
           rawData = data;
         },
         status: () => pseudoRes,
-        send: () => {},
+        send: () => { },
       };
       await getReportData(pseudoReq, pseudoRes);
 
       const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "p" });
       const pageWidth = doc.internal.pageSize.getWidth();
-      doc.setFontSize(14);
-      doc.text("Teachers Without Routine", pageWidth / 2, 36, {
-        align: "center",
+      const headerStartY = drawProfessionalReportHeader(doc, {
+        title: "Teachers Without Routine",
+        subtitle: `Year: ${year}`,
       });
-      doc.setFontSize(10);
-      doc.text(`Year: ${year}`, pageWidth / 2, 52, { align: "center" });
 
       doc.autoTable({
-        startY: 70,
+        startY: headerStartY + 4,
         head: [
           [
             "S.L.",
             "Teacher ID",
             "Teacher",
-            "Campus",
+            "Shift",
             "Year",
             "Status",
             "Routine",
@@ -1748,39 +2471,61 @@ const exportCustomReportToPDF = async (req, res) => {
         ],
         body: ArrayOfData(rawData)
           ? rawData.map((item, index) => [
-              index + 1,
-              item.TEACHERID,
-              item.TEACHER?.toUpperCase?.() || item.TEACHER || "N/A",
-              item.CAMPUS,
-              item.YEAR,
-              item.STATUS,
-              item.ROUTINE_STATUS,
-            ])
+            index + 1,
+            item.TEACHERID,
+            item.TEACHER?.toUpperCase?.() || item.TEACHER || "N/A",
+            item.CAMPUS,
+            item.YEAR,
+            item.STATUS,
+            item.ROUTINE_STATUS,
+          ])
           : [
-              [
-                "-",
-                "-",
-                "No teachers without routine found",
-                "-",
-                year,
-                "-",
-                "-",
-              ],
+            [
+              "-",
+              "-",
+              "No teachers without routine found",
+              "-",
+              year,
+              "-",
+              "-",
             ],
+          ],
         theme: "grid",
-        headStyles: {
+        headStyles: withUniformHeadStyles({
           fillColor: [30, 58, 138],
           textColor: 255,
           lineColor: [71, 85, 105],
           lineWidth: 0.5,
-        },
-        styles: {
+        }),
+        styles: getUniformTableStyles({
           fontSize: 8,
-          overflow: "linebreak",
           textColor: [15, 23, 42],
           lineColor: [71, 85, 105],
           lineWidth: 0.4,
+        }),
+        bodyStyles: getUniformBodyStyles(),
+        columnStyles: {
+          0: { cellWidth: 28, halign: "center" },
+          1: { cellWidth: 62 },
+          2: { cellWidth: 140 },
+          3: { cellWidth: 90 },
+          4: { cellWidth: 38, halign: "center" },
+          5: { cellWidth: 70 },
+          6: { cellWidth: 87 },
         },
+        didParseCell: createUniformRowDidParseCell(doc, {
+          fontSize: 8,
+          columnMaxLines: { 2: 2 },
+          columnWidths: {
+            0: 28,
+            1: 62,
+            2: 140,
+            3: 90,
+            4: 38,
+            5: 70,
+            6: 87,
+          },
+        }),
         margin: { bottom: 46 },
         didDrawPage: (data) => {
           drawReportFooter(doc, data.pageNumber);
@@ -1807,41 +2552,14 @@ const exportCustomReportToPDF = async (req, res) => {
         rawData = data;
       },
       status: () => pseudoRes,
-      send: () => {},
+      send: () => { },
     };
     await getReportData(pseudoReq, pseudoRes);
 
     if (!ArrayOfData(rawData))
       return res.status(404).json({ message: "No data found." });
 
-    const CLASS_ORDER = [
-      "ONE",
-      "TWO",
-      "THREE",
-      "FOUR",
-      "FIVE",
-      "SIX",
-      "SEVEN",
-      "EIGHT",
-      "NINE",
-      "TEN",
-    ];
-    rawData.sort((a, b) => {
-      const aClassIdx = CLASS_ORDER.indexOf(a.CLASS?.toUpperCase());
-      const bClassIdx = CLASS_ORDER.indexOf(b.CLASS?.toUpperCase());
-      if (aClassIdx !== bClassIdx)
-        return (
-          (aClassIdx === -1 ? 999 : aClassIdx) -
-          (bClassIdx === -1 ? 999 : bClassIdx)
-        );
-
-      const aSubIdx = getExaminerSubjectRank(a.CLASS, a.SUBJECT);
-      const bSubIdx = getExaminerSubjectRank(b.CLASS, b.SUBJECT);
-      if (aSubIdx !== bSubIdx)
-        return aSubIdx - bSubIdx;
-
-      return a.TEACHER.localeCompare(b.TEACHER);
-    });
+    rawData.sort(compareAssignmentReportRows);
 
     const shouldUseExaminerClassReport =
       reportType === "EXPORT_CLASS_DETAILED" &&
@@ -1884,27 +2602,32 @@ const exportCustomReportToPDF = async (req, res) => {
       branchId,
       classId,
     });
-    doc.setFontSize(14);
-    doc.text(
-      shouldUseExaminerCampusHeading
-        ? "List of Examiner & Scrutinizer"
-        : questionMeta.title || "Detailed Report",
-      pageWidth / 2,
-      36,
-      { align: "center" }
-    );
-    doc.setFontSize(10);
     const subtitleText = shouldUseExaminerCampusHeading
       ? [getExaminerExamName(selectedTypeDetails, year), reportHeaderLine]
-          .filter(Boolean)
-          .join("\n")
+        .filter(Boolean)
+        .join("\n")
       : reportHeaderLine || `Year: ${year} | Type: ${responsibilityName}`;
     const subtitleLines = doc.splitTextToSize(subtitleText, pageWidth - 80);
-    doc.text(subtitleLines, pageWidth / 2, 52, { align: "center" });
+    const headerStartY = drawProfessionalReportHeader(doc, {
+      title: shouldUseExaminerCampusHeading
+        ? "List of Examiner & Scrutinizer"
+        : questionMeta.title || "Detailed Report",
+      subtitleLines,
+      y: 40,
+    });
+
+    const detailedColumnWidths = {
+      0: 28,
+      1: 90,
+      2: 60,
+      3: 80,
+      4: 175,
+      5: 82,
+    };
 
     doc.autoTable({
-      startY: 58 + subtitleLines.length * 10,
-      head: [["S.L.", "DUTY TYPE", "CLASS", "SUBJECT", "TEACHER", "CAMPUS"]],
+      startY: headerStartY + 4,
+      head: [["S.L.", "DUTY TYPE", "CLASS", "SUBJECT", "TEACHER", "SHIFT"]],
       body: rawData.map((item, index) => [
         index + 1,
         item.RESPONSIBILITY_TYPE,
@@ -1914,18 +2637,34 @@ const exportCustomReportToPDF = async (req, res) => {
         item.CAMPUS,
       ]),
       theme: "grid",
-      headStyles: {
+      tableWidth: pageWidth - 80,
+      headStyles: withUniformHeadStyles({
         fillColor: [30, 58, 138],
         textColor: 255,
         lineColor: [71, 85, 105],
         lineWidth: 0.5,
-      },
-      styles: {
+      }),
+      styles: getUniformTableStyles({
         textColor: [15, 23, 42],
         lineColor: [71, 85, 105],
         lineWidth: 0.4,
+        fontSize: 8,
+      }),
+      bodyStyles: getUniformBodyStyles(),
+      columnStyles: {
+        0: { cellWidth: detailedColumnWidths[0], halign: "center" },
+        1: { cellWidth: detailedColumnWidths[1] },
+        2: { cellWidth: detailedColumnWidths[2] },
+        3: { cellWidth: detailedColumnWidths[3] },
+        4: { cellWidth: detailedColumnWidths[4] },
+        5: { cellWidth: detailedColumnWidths[5] },
       },
-      margin: { bottom: 46 },
+      didParseCell: createUniformRowDidParseCell(doc, {
+        fontSize: 8,
+        columnWidths: detailedColumnWidths,
+        columnMaxLines: { 4: 2 },
+      }),
+      margin: { top: 48, left: 40, right: 40, bottom: 46 },
       didDrawPage: (data) => {
         drawReportFooter(doc, data.pageNumber);
       },
@@ -2013,56 +2752,65 @@ const exportCampusRoutinePDF = async (req, res) => {
     }
 
     // PDF হেডার
-    doc.setFontSize(18);
-    doc.setFont("helvetica", "bold");
-    doc.text("Teacher's Academic Routine", pageWidth / 2, 45, {
-      align: "center",
+    const headerStartY = drawProfessionalReportHeader(doc, {
+      y: 28,
+      title: "Teacher's Academic Routine",
+      subtitle: `Campus: ${campusName} | Year: ${selectedYear}`,
+      titleFontSize: 14,
     });
 
-    doc.setFontSize(11);
-    doc.setFont("helvetica", "normal");
-    doc.text(
-      `Campus: ${campusName} | Year: ${selectedYear}`,
-      pageWidth / 2,
-      62,
-      { align: "center" }
-    );
+    const routineColumnWidths = {
+      0: 35,
+      1: 72,
+      2: 152,
+      3: 72,
+      4: 108,
+    };
 
     doc.autoTable({
-      startY: 80,
-      head: [["SL", "Campus", "Name", "Class", "Subject"]],
+      startY: headerStartY + 4,
+      head: [["SL", "Shift", "Name", "Class", "Subject"]],
       body: tableBody,
       theme: "grid",
-      headStyles: {
+      headStyles: withUniformHeadStyles({
         fillColor: [255, 255, 255],
         textColor: [0, 0, 0],
         lineWidth: 1,
         fontStyle: "bold",
         halign: "center",
-      },
-      styles: {
+      }),
+      styles: getUniformTableStyles({
         fontSize: 10,
         textColor: [0, 0, 0],
         lineWidth: 0.5,
-        valign: "middle", // ভার্টিক্যালি সেন্টার
-      },
+      }),
+      bodyStyles: getUniformBodyStyles(),
       columnStyles: {
-        0: { halign: "center", cellWidth: 35 },
-        1: { halign: "center", cellWidth: 80 },
-        2: { halign: "left", fontStyle: "bold", cellWidth: 140 }, // 🚀 Name Left Aligned
-        3: { halign: "center", cellWidth: 80 },
-        4: { halign: "left" },
+        0: { halign: "center", cellWidth: routineColumnWidths[0] },
+        1: { halign: "center", cellWidth: routineColumnWidths[1] },
+        2: {
+          halign: "left",
+          fontStyle: "bold",
+          cellWidth: routineColumnWidths[2],
+        },
+        3: { halign: "center", cellWidth: routineColumnWidths[3] },
+        4: { halign: "left", cellWidth: routineColumnWidths[4] },
       },
-      didParseCell: function (data) {
-        if (data.section === "body" && data.column.index <= 2) {
-          const spanInfo = teacherRowSpans.find(
-            (s) => s.startIndex === data.row.index
-          );
-          if (spanInfo) {
-            data.cell.rowSpan = spanInfo.span;
+      didParseCell: createUniformRowDidParseCell(doc, {
+        fontSize: 10,
+        columnWidths: routineColumnWidths,
+        columnMaxLines: { 2: 2 },
+        beforeParse: (data) => {
+          if (data.section === "body" && data.column.index <= 2) {
+            const spanInfo = teacherRowSpans.find(
+              (s) => s.startIndex === data.row.index
+            );
+            if (spanInfo) {
+              data.cell.rowSpan = spanInfo.span;
+            }
           }
-        }
-      },
+        },
+      }),
       didDrawPage: function (data) {
         drawReportFooter(doc, data.pageNumber);
       },
