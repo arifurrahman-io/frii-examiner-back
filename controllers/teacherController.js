@@ -56,8 +56,17 @@ const denyTeacherRatingReportAccess = (res) =>
 
 // --- ১. নতুন শিক্ষক যোগ করা ---
 const addTeacher = async (req, res) => {
-  const { teacherId, name, banglaName, phone, campus, designation, basicSalary, houseRent } =
-    req.body;
+  const {
+    teacherId,
+    name,
+    banglaName,
+    phone,
+    campus,
+    designation,
+    joiningDate,
+    basicSalary,
+    houseRent,
+  } = req.body;
   try {
     const targetCampusId =
       req.user.role === "incharge" ? req.user.campus : campus;
@@ -97,6 +106,7 @@ const addTeacher = async (req, res) => {
       phone,
       campus: branch._id,
       designation,
+      joiningDate: joiningDate ? new Date(joiningDate) : null,
       basicSalary: Math.max(0, Number(basicSalary) || 0),
       houseRent: houseRentFromBasic(basicSalary),
     });
@@ -458,6 +468,7 @@ const updateTeacher = async (req, res) => {
           "phone",
           "campus",
           "designation",
+          "joiningDate",
           "isActive",
           "basicSalary",
           "houseRent",
@@ -478,6 +489,11 @@ const updateTeacher = async (req, res) => {
     if (payload.basicSalary !== undefined) {
       payload.basicSalary = Math.max(0, Number(payload.basicSalary) || 0);
       payload.houseRent = houseRentFromBasic(payload.basicSalary);
+    }
+    if (payload.joiningDate !== undefined) {
+      payload.joiningDate = payload.joiningDate
+        ? new Date(payload.joiningDate)
+        : null;
     }
     if (payload.banglaName !== undefined) {
       payload.banglaName = String(payload.banglaName || "").trim();

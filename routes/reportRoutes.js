@@ -5,6 +5,8 @@ const {
   getReportData,
   getExaminerExchangeDates,
   saveExaminerExchangeDates,
+  getExaminerPairOrders,
+  saveExaminerPairOrders,
   exportCustomReportToPDF,
   exportCampusWiseYearlyPDF,
   exportCampusRoutinePDF,
@@ -20,6 +22,10 @@ router
   .route("/examiner-exchange-dates")
   .get(getExaminerExchangeDates)
   .put(saveExaminerExchangeDates);
+router
+  .route("/examiner-pair-orders")
+  .get(getExaminerPairOrders)
+  .put(saveExaminerPairOrders);
 
 router.get("/export/custom-pdf", exportCustomReportToPDF);
 router.get("/export/yearly-pdf", exportCampusWiseYearlyPDF);

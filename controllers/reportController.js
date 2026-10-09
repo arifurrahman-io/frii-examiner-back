@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const ResponsibilityAssignment = require("../models/ResponsibilityAssignmentModel");
 const ResponsibilityType = require("../models/ResponsibilityTypeModel");
 const ExaminerExchangeDate = require("../models/ExaminerExchangeDateModel");
+const ExaminerPairOrder = require("../models/ExaminerPairOrderModel");
 const Routine = require("../models/RoutineModel");
 const Branch = require("../models/BranchModel");
 const Class = require("../models/ClassModel");
@@ -20,7 +21,6 @@ const {
 const {
   BRAND,
   INSTITUTE_NAME,
-  drawInstituteLogo,
   drawProfessionalReportHeader,
 } = require("../utils/reportBranding");
 
@@ -328,6 +328,79 @@ const getExaminerSubjectRank = (className = "", subjectName = "") => {
   return index === -1 ? 999 : index;
 };
 
+const isSeniorExaminerClass = (className = "") =>
+  getExaminerSubjectOrderGroup(className) === "SENIOR";
+
+const isSeniorScrutinizerSubject = (subjectName = "") =>
+  ["ICT", "AGRICULTURE", "H.SCIENCE"].includes(
+    normalizeSubjectName(subjectName)
+  );
+
+/** Nine/Ten ICT, Agriculture, H.Science: Examiner + Scrutinizer only (no senior/junior). */
+const isExaminerScrutinizerPair = (className = "", subjectName = "") =>
+  isSeniorExaminerClass(className) && isSeniorScrutinizerSubject(subjectName);
+
+const getJoiningDateValue = (row = {}) => {
+  if (!row.JOINING_DATE) return null;
+  const date = new Date(row.JOINING_DATE);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+};
+
+const compareExaminerTeachersNeutral = (a = {}, b = {}) => {
+  const idCompare = String(a.TEACHERID || "").localeCompare(
+    String(b.TEACHERID || ""),
+    undefined,
+    { numeric: true, sensitivity: "base" }
+  );
+  if (idCompare !== 0) return idCompare;
+  return (a.TEACHER || "").localeCompare(b.TEACHER || "");
+};
+
+/** Senior first via joiningDate — skipped for Examiner/Scrutinizer subjects. */
+const compareExaminerTeachers = (a = {}, b = {}, { skipSeniority = false } = {}) => {
+  if (!skipSeniority) {
+    const aJoin = getJoiningDateValue(a);
+    const bJoin = getJoiningDateValue(b);
+    if (aJoin !== null && bJoin !== null && aJoin !== bJoin) return aJoin - bJoin;
+    if (aJoin !== null && bJoin === null) return -1;
+    if (aJoin === null && bJoin !== null) return 1;
+  }
+  return compareExaminerTeachersNeutral(a, b);
+};
+
+const sortSubjectExaminerRows = (
+  rows = [],
+  teacherOrder = [],
+  { className = "", subjectName = "" } = {}
+) => {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+
+  const skipSeniority = isExaminerScrutinizerPair(className, subjectName);
+  const compare = (a, b) =>
+    compareExaminerTeachers(a, b, { skipSeniority });
+
+  const ordered = [...rows];
+  if (Array.isArray(teacherOrder) && teacherOrder.length > 0) {
+    const rank = new Map(
+      teacherOrder.map((id, index) => [String(id), index])
+    );
+    ordered.sort((a, b) => {
+      const aRank = rank.has(String(a.TEACHER_REF_ID))
+        ? rank.get(String(a.TEACHER_REF_ID))
+        : Number.MAX_SAFE_INTEGER;
+      const bRank = rank.has(String(b.TEACHER_REF_ID))
+        ? rank.get(String(b.TEACHER_REF_ID))
+        : Number.MAX_SAFE_INTEGER;
+      if (aRank !== bRank) return aRank - bRank;
+      return compare(a, b);
+    });
+    return ordered;
+  }
+
+  ordered.sort(compare);
+  return ordered;
+};
+
 const compareAssignmentReportRows = (a, b) => {
   const aClassIdx = CLASS_ORDER.indexOf(normalizeReportLabel(a.CLASS));
   const bClassIdx = CLASS_ORDER.indexOf(normalizeReportLabel(b.CLASS));
@@ -345,16 +418,10 @@ const compareAssignmentReportRows = (a, b) => {
   const subjectCompare = (a.SUBJECT || "").localeCompare(b.SUBJECT || "");
   if (subjectCompare !== 0) return subjectCompare;
 
-  return (a.TEACHER || "").localeCompare(b.TEACHER || "");
+  return compareExaminerTeachers(a, b, {
+    skipSeniority: isExaminerScrutinizerPair(a.CLASS, a.SUBJECT),
+  });
 };
-
-const isSeniorExaminerClass = (className = "") =>
-  getExaminerSubjectOrderGroup(className) === "SENIOR";
-
-const isSeniorScrutinizerSubject = (subjectName = "") =>
-  ["ICT", "AGRICULTURE", "H.SCIENCE"].includes(
-    normalizeSubjectName(subjectName)
-  );
 
 const formatExchangeDate = (value) => {
   if (!value) return "";
@@ -426,10 +493,56 @@ const getSavedExchangeDateMap = async ({ year, rows = [] }) => {
   );
 };
 
+const getSavedPairOrderMap = async ({ year, rows = [] }) => {
+  const selectedYear = parseInt(year, 10);
+  if (!selectedYear || rows.length === 0) return {};
+
+  const keys = rows
+    .map((row) => ({
+      responsibilityType: row.RESPONSIBILITY_TYPE_ID,
+      targetClass: row.CLASS_ID,
+      targetSubject: row.SUBJECT_ID,
+    }))
+    .filter(
+      (item) =>
+        mongoose.Types.ObjectId.isValid(item.responsibilityType) &&
+        mongoose.Types.ObjectId.isValid(item.targetClass) &&
+        mongoose.Types.ObjectId.isValid(item.targetSubject)
+    );
+
+  if (keys.length === 0) return {};
+
+  const uniqueKeys = [
+    ...new Map(
+      keys.map((item) => [
+        getExchangeDateIdKey(item),
+        item,
+      ])
+    ).values(),
+  ];
+
+  const records = await ExaminerPairOrder.find({
+    year: selectedYear,
+    $or: uniqueKeys.map((item) => ({
+      responsibilityType: new mongoose.Types.ObjectId(item.responsibilityType),
+      targetClass: new mongoose.Types.ObjectId(item.targetClass),
+      targetSubject: new mongoose.Types.ObjectId(item.targetSubject),
+    })),
+  }).lean();
+
+  return Object.fromEntries(
+    records.map((record) => [
+      getExchangeDateIdKey(record),
+      (record.teacherOrder || []).map((id) => String(id)),
+    ])
+  );
+};
+
 const buildExaminerReportBody = ({
   rows = [],
   lastDateOfExchange = "",
   exchangeDateMap = {},
+  pairOrderMap = {},
 }) => {
   const grouped = new Map();
   rows.forEach((row) => {
@@ -447,24 +560,29 @@ const buildExaminerReportBody = ({
   grouped.forEach((subjectMap, className) => {
     const body = [];
     subjectMap.forEach((subjectRows, subjectName) => {
-      for (let i = 0; i < subjectRows.length; i += 2) {
-        const first = subjectRows[i] || {};
-        const second = subjectRows[i + 1] || {};
+      const referenceRow = subjectRows[0] || {};
+      const orderKey = getExchangeDateIdKey({
+        responsibilityType: referenceRow.RESPONSIBILITY_TYPE_ID,
+        targetClass: referenceRow.CLASS_ID,
+        targetSubject: referenceRow.SUBJECT_ID,
+      });
+      const orderedRows = sortSubjectExaminerRows(
+        subjectRows,
+        pairOrderMap[orderKey] || [],
+        { className, subjectName }
+      );
+
+      for (let i = 0; i < orderedRows.length; i += 2) {
+        const first = orderedRows[i] || {};
+        const second = orderedRows[i + 1] || {};
         const isFirstRow = i === 0;
 
-        const referenceRow = subjectRows[0] || {};
         const exchangeDate =
-          exchangeDateMap[
-          getExchangeDateIdKey({
-            responsibilityType: referenceRow.RESPONSIBILITY_TYPE_ID,
-            targetClass: referenceRow.CLASS_ID,
-            targetSubject: referenceRow.SUBJECT_ID,
-          })
-          ] ||
+          exchangeDateMap[orderKey] ||
           exchangeDateMap[getExchangeDateKey(className, subjectName)] ||
           lastDateOfExchange;
 
-        const rowSpan = Math.ceil(subjectRows.length / 2);
+        const rowSpan = Math.ceil(orderedRows.length / 2);
         let rowArray;
 
         if (isFirstRow) {
@@ -489,7 +607,7 @@ const buildExaminerReportBody = ({
             "",
           ];
         }
-        
+
         rowArray._subjectName = subjectName;
         body.push(rowArray);
       }
@@ -510,6 +628,7 @@ const drawExaminerClassWiseReport = ({
   year,
   lastDateOfExchange,
   exchangeDateMap,
+  pairOrderMap = {},
 }) => {
   const pageWidth = doc.internal.pageSize.getWidth();
   const examName = getExaminerExamName(selectedTypeDetails, year);
@@ -517,6 +636,7 @@ const drawExaminerClassWiseReport = ({
     rows: rawData,
     lastDateOfExchange,
     exchangeDateMap,
+    pairOrderMap,
   });
 
   const contentStartY = drawProfessionalReportHeader(doc, {
@@ -1446,6 +1566,14 @@ const getReportData = async (req, res) => {
           STATUS: "$status",
           _ID: "$_id",
           TEACHERID: "$teacherDetails.teacherId",
+          TEACHER_REF_ID: {
+            $cond: [
+              { $ifNull: ["$teacherDetails._id", false] },
+              { $toString: "$teacherDetails._id" },
+              "",
+            ],
+          },
+          JOINING_DATE: "$teacherDetails.joiningDate",
         },
       });
       pipeline.push({ $sort: { CLASS: 1, TEACHER: 1 } });
@@ -1459,7 +1587,7 @@ const getReportData = async (req, res) => {
       return res.json(formatted);
     } else {
       const assignments = await ResponsibilityAssignment.find(filter)
-        .populate("teacher", "name teacherId campus")
+        .populate("teacher", "name teacherId campus joiningDate")
         .populate("teacherCampus", "name")
         .populate("responsibilityType", "name")
         .populate("targetClass", "name level")
@@ -1480,6 +1608,8 @@ const getReportData = async (req, res) => {
         STATUS: a.status,
         _ID: a._id,
         TEACHERID: a.teacher?.teacherId || "N/A",
+        TEACHER_REF_ID: a.teacher?._id?.toString() || "",
+        JOINING_DATE: a.teacher?.joiningDate || null,
       }))
         .sort(compareAssignmentReportRows)
         .map((item, idx) => ({ ...item, ID: idx + 1 }));
@@ -1582,6 +1712,107 @@ const saveExaminerExchangeDates = async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       message: "Failed to save exchange dates.",
+    });
+  }
+};
+
+const getExaminerPairOrders = async (req, res) => {
+  try {
+    const { year, typeIds, classIds, subjectIds } = req.query;
+    const selectedYear = parseInt(year, 10);
+    const selectedTypeIds = parseObjectIdList(typeIds);
+    const selectedClassIds = parseObjectIdList(classIds);
+    const selectedSubjectIds = parseObjectIdList(subjectIds);
+
+    if (!selectedYear || selectedTypeIds.length === 0) {
+      return res.status(400).json({
+        message: "Year and at least one duty type are required.",
+      });
+    }
+
+    const filter = {
+      year: selectedYear,
+      responsibilityType: { $in: selectedTypeIds },
+    };
+    if (selectedClassIds.length > 0) filter.targetClass = { $in: selectedClassIds };
+    if (selectedSubjectIds.length > 0)
+      filter.targetSubject = { $in: selectedSubjectIds };
+
+    const records = await ExaminerPairOrder.find(filter).lean();
+    return res.json(
+      records.map((record) => ({
+        key: getExchangeDateIdKey(record),
+        year: record.year,
+        responsibilityType: record.responsibilityType,
+        targetClass: record.targetClass,
+        targetSubject: record.targetSubject,
+        teacherOrder: (record.teacherOrder || []).map((id) => String(id)),
+      }))
+    );
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to fetch examiner pair orders.",
+    });
+  }
+};
+
+const saveExaminerPairOrders = async (req, res) => {
+  try {
+    const { year, entries = [] } = req.body;
+    const selectedYear = parseInt(year, 10);
+
+    if (!selectedYear || !Array.isArray(entries)) {
+      return res.status(400).json({ message: "Invalid pair order payload." });
+    }
+
+    const operations = entries
+      .filter(
+        (entry) =>
+          mongoose.Types.ObjectId.isValid(entry.responsibilityType) &&
+          mongoose.Types.ObjectId.isValid(entry.targetClass) &&
+          mongoose.Types.ObjectId.isValid(entry.targetSubject) &&
+          Array.isArray(entry.teacherOrder) &&
+          entry.teacherOrder.length > 0 &&
+          entry.teacherOrder.every((id) => mongoose.Types.ObjectId.isValid(id))
+      )
+      .map((entry) => {
+        const filter = {
+          year: selectedYear,
+          responsibilityType: new mongoose.Types.ObjectId(
+            entry.responsibilityType
+          ),
+          targetClass: new mongoose.Types.ObjectId(entry.targetClass),
+          targetSubject: new mongoose.Types.ObjectId(entry.targetSubject),
+        };
+        const teacherOrder = entry.teacherOrder.map(
+          (id) => new mongoose.Types.ObjectId(id)
+        );
+
+        return {
+          updateOne: {
+            filter,
+            update: {
+              $set: {
+                ...filter,
+                teacherOrder,
+              },
+            },
+            upsert: true,
+          },
+        };
+      });
+
+    if (operations.length > 0) {
+      await ExaminerPairOrder.bulkWrite(operations);
+    }
+
+    return res.json({
+      message: "Examiner pair orders saved.",
+      count: operations.length,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to save examiner pair orders.",
     });
   }
 };
@@ -2196,56 +2427,29 @@ const exportCustomReportToPDF = async (req, res) => {
         });
       };
 
-      const logoWidth = 44;
-      const logoHeight = 56;
-      const logoDrawn = drawInstituteLogo(doc, {
-        x: marginX,
-        y: 22,
-        width: logoWidth,
-        height: logoHeight,
-      });
-      const textX = logoDrawn ? marginX + logoWidth + 12 : marginX;
-      const titleMaxWidth = usableWidth - (logoDrawn ? logoWidth + 12 : 0) - 150;
-
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(14);
-      doc.setTextColor(...slate);
-      doc.text("Subject-wise Assigned Teachers", textX, 36, {
-        maxWidth: titleMaxWidth,
-      });
-
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(9);
-      doc.setTextColor(...BRAND.slate);
-      doc.text(
-        `Academic Year ${year}  ·  ${campusLabel}`,
-        textX,
-        50,
-        { maxWidth: titleMaxWidth }
-      );
-
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(10);
-      doc.setTextColor(...slate);
-      doc.text("Duty Assignment Register", textX, 64, {
-        maxWidth: titleMaxWidth,
+      const headerEndY = drawProfessionalReportHeader(doc, {
+        y: 14,
+        withDivider: true,
+        title: "Subject-wise Assigned Teachers",
+        subtitleLines: [
+          `Academic Year ${year}  ·  ${campusLabel}`,
+          "Duty Assignment Register",
+        ],
+        titleFontSize: 13,
+        subtitleFontSize: 9.5,
       });
 
       doc.setFont("helvetica", "normal");
       doc.setFontSize(7.5);
       doc.setTextColor(...muted);
-      doc.text(`Generated: ${getReportGeneratedAt()}`, pageWidth - marginX, 38, {
+      doc.text(`Generated: ${getReportGeneratedAt()}`, pageWidth - marginX, 28, {
         align: "right",
       });
-      doc.text(`Prepared by: ${preparedBy}`, pageWidth - marginX, 50, {
+      doc.text(`Prepared by: ${preparedBy}`, pageWidth - marginX, 40, {
         align: "right",
       });
 
-      doc.setDrawColor(...teal);
-      doc.setLineWidth(1);
-      doc.line(marginX, 86, pageWidth - marginX, 86);
-
-      const filterY = 92;
+      const filterY = headerEndY + 14;
       const filterPadX = 10;
       const filterInnerWidth = usableWidth - filterPadX * 2;
       const colGap = 18;
@@ -2577,10 +2781,16 @@ const exportCustomReportToPDF = async (req, res) => {
 
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "p" });
     if (shouldUseExaminerClassReport) {
-      const savedExchangeDateMap = await getSavedExchangeDateMap({
-        year,
-        rows: rawData,
-      });
+      const [savedExchangeDateMap, savedPairOrderMap] = await Promise.all([
+        getSavedExchangeDateMap({
+          year,
+          rows: rawData,
+        }),
+        getSavedPairOrderMap({
+          year,
+          rows: rawData,
+        }),
+      ]);
       drawExaminerClassWiseReport({
         doc,
         rawData,
@@ -2591,6 +2801,7 @@ const exportCustomReportToPDF = async (req, res) => {
           ...savedExchangeDateMap,
           ...parsedExchangeDateMap,
         },
+        pairOrderMap: savedPairOrderMap,
       });
 
       res.setHeader("Content-Type", "application/pdf");
@@ -2834,6 +3045,8 @@ module.exports = {
   getReportData,
   getExaminerExchangeDates,
   saveExaminerExchangeDates,
+  getExaminerPairOrders,
+  saveExaminerPairOrders,
   exportCustomReportToPDF,
   exportCampusWiseYearlyPDF,
   exportCampusRoutinePDF,

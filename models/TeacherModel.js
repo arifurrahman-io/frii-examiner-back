@@ -38,6 +38,10 @@ const TeacherSchema = new mongoose.Schema(
       type: String,
       required: false,
     },
+    joiningDate: {
+      type: Date,
+      default: null,
+    },
     basicSalary: {
       type: Number,
       default: 0,
