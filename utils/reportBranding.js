@@ -49,7 +49,7 @@ const drawInstituteLogo = (doc, options = {}) => {
   return true;
 };
 
-const getHeaderLogoSize = (pageWidth, preferredWidth = 430) => {
+const getHeaderLogoSize = (pageWidth, preferredWidth = 320) => {
   const width = Math.min(pageWidth - 72, preferredWidth);
   const height = width / HEADER_LOGO_ASPECT;
   return { width, height };
@@ -57,8 +57,8 @@ const getHeaderLogoSize = (pageWidth, preferredWidth = 430) => {
 
 const drawInstituteHeaderLogo = (doc, options = {}) => {
   const {
-    y = 16,
-    preferredWidth = 430,
+    y = 14,
+    preferredWidth = 320,
     centerX = doc.internal.pageSize.getWidth() / 2,
   } = options;
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -78,14 +78,14 @@ const getTitleBaselineY = (dividerY, titleFontSize = 13) =>
 
 const drawInstituteHeader = (doc, options = {}) => {
   const {
-    y = 16,
+    y = 14,
     fontSize = 17,
     align = "center",
     color = BRAND.navy,
     x = null,
     withDivider = false,
     dividerWidth = null,
-    preferredWidth = 430,
+    preferredWidth = 320,
     useLogo = true,
   } = options;
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -168,7 +168,7 @@ const drawReportTitleBlock = (doc, options = {}) => {
 
 const drawProfessionalReportHeader = (doc, options = {}) => {
   const {
-    y = 16,
+    y = 14,
     instituteFontSize = 17,
     withDivider = true,
     title = null,
@@ -176,7 +176,7 @@ const drawProfessionalReportHeader = (doc, options = {}) => {
     subtitleLines = null,
     titleFontSize = 13,
     subtitleFontSize = 10.5,
-    preferredWidth = 430,
+    preferredWidth = 320,
     centerX = doc.internal.pageSize.getWidth() / 2,
   } = options;
 

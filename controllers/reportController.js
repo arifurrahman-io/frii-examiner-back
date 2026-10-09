@@ -204,6 +204,16 @@ const getQuestionReportMeta = (types = [], year) => {
 const isExaminerResponsibilityType = (name = "") =>
   name.trim().toUpperCase().startsWith("E");
 
+/** E-Test → S-Test, E-Pre-Test → S-Pre-Test, etc. */
+const getPairedScrutinizerDutyName = (examinerDutyName = "") => {
+  const name = String(examinerDutyName || "").trim();
+  if (!/^E[\s_-]*/i.test(name)) return null;
+  return name.replace(/^E/i, "S");
+};
+
+const getClassSubjectNameKey = (className = "", subjectName = "") =>
+  `${normalizeReportLabel(className)}|||${normalizeSubjectName(subjectName)}`;
+
 const getExaminerTerm = (name = "") => {
   const term = name.trim().replace(/^E[\s_-]*/i, "").trim().toUpperCase();
   const labels = {
@@ -538,8 +548,54 @@ const getSavedPairOrderMap = async ({ year, rows = [] }) => {
   );
 };
 
+const indexRowsByClassSubject = (rows = []) => {
+  const map = new Map();
+  rows.forEach((row) => {
+    const key = getClassSubjectNameKey(row.CLASS, row.SUBJECT);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(row);
+  });
+  return map;
+};
+
+const buildExaminerPairRow = ({
+  subjectName,
+  first = {},
+  second = {},
+  exchangeDate = "",
+  rowSpan = 1,
+  isFirstRow = true,
+}) => {
+  let rowArray;
+  if (isFirstRow) {
+    rowArray = [
+      { content: subjectName, rowSpan, styles: { valign: "middle" } },
+      first.TEACHER?.toUpperCase?.() || first.TEACHER || "",
+      first.CAMPUS || "",
+      "",
+      formatExchangeDate(exchangeDate),
+      second.TEACHER?.toUpperCase?.() || second.TEACHER || "",
+      second.CAMPUS || "",
+      "",
+    ];
+  } else {
+    rowArray = [
+      first.TEACHER?.toUpperCase?.() || first.TEACHER || "",
+      first.CAMPUS || "",
+      "",
+      "",
+      second.TEACHER?.toUpperCase?.() || second.TEACHER || "",
+      second.CAMPUS || "",
+      "",
+    ];
+  }
+  rowArray._subjectName = subjectName;
+  return rowArray;
+};
+
 const buildExaminerReportBody = ({
   rows = [],
+  scrutinizerRows = [],
   lastDateOfExchange = "",
   exchangeDateMap = {},
   pairOrderMap = {},
@@ -555,61 +611,85 @@ const buildExaminerReportBody = ({
     subjectMap.get(subjectName).push(row);
   });
 
+  // Also include scrutinizer-only subjects (S-* assigned but no E-* yet)
+  scrutinizerRows.forEach((row) => {
+    if (!isExaminerScrutinizerPair(row.CLASS, row.SUBJECT)) return;
+    const className = row.CLASS || "N/A";
+    const subjectName = row.SUBJECT || "N/A";
+    if (!grouped.has(className)) grouped.set(className, new Map());
+    const subjectMap = grouped.get(className);
+    if (!subjectMap.has(subjectName)) subjectMap.set(subjectName, []);
+  });
+
+  const scrutinizerBySubject = indexRowsByClassSubject(scrutinizerRows);
   const sections = [];
 
   grouped.forEach((subjectMap, className) => {
     const body = [];
     subjectMap.forEach((subjectRows, subjectName) => {
-      const referenceRow = subjectRows[0] || {};
+      const referenceRow = subjectRows[0] || scrutinizerBySubject.get(
+        getClassSubjectNameKey(className, subjectName)
+      )?.[0] || {};
       const orderKey = getExchangeDateIdKey({
         responsibilityType: referenceRow.RESPONSIBILITY_TYPE_ID,
         targetClass: referenceRow.CLASS_ID,
         targetSubject: referenceRow.SUBJECT_ID,
       });
+      const exchangeDate =
+        exchangeDateMap[orderKey] ||
+        exchangeDateMap[getExchangeDateKey(className, subjectName)] ||
+        lastDateOfExchange;
+
+      // Nine/Ten ICT, Agriculture, H.Science:
+      // Examiner from E-*, Scrutinizer from paired S-* (S-Test / S-Pre-Test)
+      if (isExaminerScrutinizerPair(className, subjectName)) {
+        const examiners = sortSubjectExaminerRows(
+          subjectRows,
+          pairOrderMap[orderKey] || [],
+          { className, subjectName }
+        );
+        const scrutinizers = sortSubjectExaminerRows(
+          scrutinizerBySubject.get(
+            getClassSubjectNameKey(className, subjectName)
+          ) || [],
+          [],
+          { className, subjectName }
+        );
+        const pairCount = Math.max(examiners.length, scrutinizers.length, 1);
+
+        for (let i = 0; i < pairCount; i += 1) {
+          body.push(
+            buildExaminerPairRow({
+              subjectName,
+              first: examiners[i] || {},
+              second: scrutinizers[i] || {},
+              exchangeDate,
+              rowSpan: pairCount,
+              isFirstRow: i === 0,
+            })
+          );
+        }
+        return;
+      }
+
       const orderedRows = sortSubjectExaminerRows(
         subjectRows,
         pairOrderMap[orderKey] || [],
         { className, subjectName }
       );
+      const rowSpan = Math.ceil(orderedRows.length / 2) || 1;
 
       for (let i = 0; i < orderedRows.length; i += 2) {
-        const first = orderedRows[i] || {};
-        const second = orderedRows[i + 1] || {};
-        const isFirstRow = i === 0;
-
-        const exchangeDate =
-          exchangeDateMap[orderKey] ||
-          exchangeDateMap[getExchangeDateKey(className, subjectName)] ||
-          lastDateOfExchange;
-
-        const rowSpan = Math.ceil(orderedRows.length / 2);
-        let rowArray;
-
-        if (isFirstRow) {
-          rowArray = [
-            { content: subjectName, rowSpan, styles: { valign: "middle" } },
-            first.TEACHER?.toUpperCase?.() || first.TEACHER || "",
-            first.CAMPUS || "",
-            "",
-            formatExchangeDate(exchangeDate),
-            second.TEACHER?.toUpperCase?.() || second.TEACHER || "",
-            second.CAMPUS || "",
-            "",
-          ];
-        } else {
-          rowArray = [
-            first.TEACHER?.toUpperCase?.() || first.TEACHER || "",
-            first.CAMPUS || "",
-            "",
-            "",
-            second.TEACHER?.toUpperCase?.() || second.TEACHER || "",
-            second.CAMPUS || "",
-            "",
-          ];
-        }
-
-        rowArray._subjectName = subjectName;
-        body.push(rowArray);
+        body.push(
+          buildExaminerPairRow({
+            subjectName,
+            first: orderedRows[i] || {},
+            second: orderedRows[i + 1] || {},
+            exchangeDate,
+            rowSpan,
+            isFirstRow: i === 0,
+          })
+        );
       }
     });
 
@@ -624,6 +704,7 @@ const EXAMINER_TABLE_COLUMN_WIDTHS = [58, 92, 54, 46, 68, 92, 54, 46];
 const drawExaminerClassWiseReport = ({
   doc,
   rawData,
+  scrutinizerData = [],
   selectedTypeDetails,
   year,
   lastDateOfExchange,
@@ -634,6 +715,7 @@ const drawExaminerClassWiseReport = ({
   const examName = getExaminerExamName(selectedTypeDetails, year);
   const sections = buildExaminerReportBody({
     rows: rawData,
+    scrutinizerRows: scrutinizerData,
     lastDateOfExchange,
     exchangeDateMap,
     pairOrderMap,
@@ -642,7 +724,8 @@ const drawExaminerClassWiseReport = ({
   const contentStartY = drawProfessionalReportHeader(doc, {
     title: "List of Examiner & Scrutinizer",
     subtitle: examName,
-    y: 40,
+    y: 14,
+    preferredWidth: 320,
   });
 
   const renderExaminerTable = ({
@@ -2781,6 +2864,46 @@ const exportCustomReportToPDF = async (req, res) => {
 
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "p" });
     if (shouldUseExaminerClassReport) {
+      const pairedScrutinizerNames = [
+        ...new Set(
+          selectedTypeDetails
+            .map((type) => getPairedScrutinizerDutyName(type.name))
+            .filter(Boolean)
+        ),
+      ];
+      let scrutinizerData = [];
+      if (pairedScrutinizerNames.length > 0) {
+        const scrutinizerTypes = await ResponsibilityType.find({
+          name: { $in: pairedScrutinizerNames },
+        })
+          .select("_id name")
+          .lean();
+        const scrutinizerTypeIds = scrutinizerTypes.map((type) =>
+          String(type._id)
+        );
+        if (scrutinizerTypeIds.length > 0) {
+          const scrutinizerReq = {
+            user: req.user,
+            query: {
+              ...req.query,
+              reportType: "DETAILED_ASSIGNMENT",
+              status: "Assigned",
+              typeId: "",
+              typeIds: scrutinizerTypeIds.join(","),
+            },
+          };
+          const scrutinizerRes = {
+            json: (data) => {
+              scrutinizerData = Array.isArray(data) ? data : [];
+            },
+            status: () => scrutinizerRes,
+            send: () => {},
+          };
+          await getReportData(scrutinizerReq, scrutinizerRes);
+          scrutinizerData.sort(compareAssignmentReportRows);
+        }
+      }
+
       const [savedExchangeDateMap, savedPairOrderMap] = await Promise.all([
         getSavedExchangeDateMap({
           year,
@@ -2794,6 +2917,7 @@ const exportCustomReportToPDF = async (req, res) => {
       drawExaminerClassWiseReport({
         doc,
         rawData,
+        scrutinizerData,
         selectedTypeDetails,
         year,
         lastDateOfExchange,
