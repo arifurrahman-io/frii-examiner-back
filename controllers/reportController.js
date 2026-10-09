@@ -725,7 +725,7 @@ const drawExaminerClassWiseReport = ({
     title: "List of Examiner & Scrutinizer",
     subtitle: examName,
     y: 14,
-    preferredWidth: 320,
+    preferredWidth: 250,
   });
 
   const renderExaminerTable = ({
