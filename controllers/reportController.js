@@ -304,6 +304,7 @@ const EXAMINER_SUBJECT_ORDER = {
     "ACCOUNTING",
     "B.ENT",
     "FINANCE & BANKING",
+    "SCIENCE",
     "G.SCIENCE",
     "ICT",
     "AGRICULTURE",

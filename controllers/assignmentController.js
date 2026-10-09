@@ -5,6 +5,11 @@ const Leave = require("../models/LeaveModel");
 const mongoose = require("mongoose");
 const Class = require("../models/ClassModel");
 const Subject = require("../models/SubjectModel");
+const {
+  getExclusiveGroup,
+  isActiveAssignmentStatus,
+} = require("../utils/dutyExclusivity");
+const { getOrCreateSettings } = require("./settingsController");
 
 // --- ১. Assign Responsibility (Updated with Incharge Restrictions) ---
 const assignResponsibility = async (req, res) => {
@@ -86,7 +91,50 @@ const assignResponsibility = async (req, res) => {
         message: `Assignment blocked: Teacher has a Granted Leave for this responsibility type in ${year}.`,
       });
 
-    // 3. Existing assignment check
+    // 3. Per-year exclusivity for E-HY / E-Pre-Test / E-Test / E-Annual
+    //    (each group can be toggled in App Settings)
+    const appSettings = await getOrCreateSettings();
+    const exclusiveGroup = getExclusiveGroup(
+      typeExists.name,
+      appSettings.dutyExclusivity
+    );
+    if (exclusiveGroup) {
+      const conflictingTypes = await ResponsibilityType.find({
+        name: { $in: exclusiveGroup.types },
+      }).select("_id name");
+
+      if (conflictingTypes.length > 0) {
+        const exclusiveConflict = await ResponsibilityAssignment.findOne({
+          teacher,
+          year,
+          responsibilityType: {
+            $in: conflictingTypes.map((item) => item._id),
+          },
+          status: { $ne: "Cancelled" },
+        })
+          .populate("responsibilityType", "name")
+          .populate("targetClass", "name")
+          .populate("targetSubject", "name");
+
+        if (
+          exclusiveConflict &&
+          isActiveAssignmentStatus(exclusiveConflict.status)
+        ) {
+          const existingType =
+            exclusiveConflict.responsibilityType?.name || "this duty";
+          const existingClass =
+            exclusiveConflict.targetClass?.name || "N/A";
+          const existingSubject =
+            exclusiveConflict.targetSubject?.name || "N/A";
+
+          return res.status(400).json({
+            message: `Assignment blocked: Teacher already has ${existingType} in ${year} (${existingClass} | ${existingSubject}). Only one ${exclusiveGroup.label} duty is allowed per teacher per year.`,
+          });
+        }
+      }
+    }
+
+    // 4. Existing exact assignment check
     const existingAssignment = await ResponsibilityAssignment.findOne({
       teacher,
       responsibilityType,
@@ -100,7 +148,7 @@ const assignResponsibility = async (req, res) => {
         message: "This exact responsibility is already assigned and active.",
       });
 
-    // 4. Create new assignment
+    // 5. Create new assignment
     const newAssignment = await ResponsibilityAssignment.create({
       teacher,
       teacherCampus: teacherCampusId,

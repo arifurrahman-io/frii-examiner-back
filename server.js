@@ -26,6 +26,7 @@ const userRoutes = require("./routes/userRoutes");
 const classPerformanceRoutes = require("./routes/classPerformanceRoutes");
 const incrementRoutes = require("./routes/incrementRoutes");
 const payrollRoutes = require("./routes/payrollRoutes");
+const settingsRoutes = require("./routes/settingsRoutes");
 
 const app = express();
 
@@ -88,6 +89,7 @@ app.use("/api/users", userRoutes);
 app.use("/api/class-performance", classPerformanceRoutes);
 app.use("/api/increment", incrementRoutes);
 app.use("/api/payroll", payrollRoutes);
+app.use("/api/settings", settingsRoutes);
 
 // ৬. রুট রাউট
 app.get("/", (req, res) => {
